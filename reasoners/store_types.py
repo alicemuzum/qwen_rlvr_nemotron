@@ -1,6 +1,7 @@
 """Shared raw payload and runtime datatypes for solver problems."""
 
 import json
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -131,6 +132,16 @@ def truncate_3dp(s: str) -> str:
     if len(frac) <= 3:
         return s
     return integer + "." + frac[:3]
+
+
+def round_2dp(s: str) -> str:
+    """Round a decimal string to exactly 2 decimal places (round-half-up).
+
+    Normalizes trailing-zero variance (e.g. "45.0" and "45.00" both become
+    "45.00") so two independently-formatted decimal strings representing the
+    same value compare equal after rounding.
+    """
+    return str(Decimal(s).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
 
 
 def _dp_count(s: str) -> int:
