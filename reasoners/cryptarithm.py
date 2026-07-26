@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from reasoners.store_types import Problem
+from reasoners.store_types import Problem, wrap_trace_with_think
 
 OP_NAMES: tuple[str, ...] = ("add", "abs_diff", "mul", "concat", "rev_concat")
 _MAX_SOLUTIONS = 500
@@ -417,4 +417,4 @@ def reasoning_cryptarithm(problem: Problem) -> str | None:
         f'<step type="conclusion">I will now return the answer in \\boxed{{}}\n'
         f"The answer in \\boxed{{–}} is \\boxed{{{computed}}}</step>"
     )
-    return "\n".join(lines)
+    return wrap_trace_with_think("\n".join(lines))

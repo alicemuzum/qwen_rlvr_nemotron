@@ -28,7 +28,7 @@ import re
 from collections import defaultdict
 from dataclasses import dataclass
 
-from reasoners.store_types import Problem
+from reasoners.store_types import Problem, wrap_trace_with_think
 
 _EXPR_RE = re.compile(r"^(\d+)(\D)(\d+)$")
 
@@ -358,4 +358,4 @@ def reasoning_equation_numeric(problem: Problem) -> str | None:
         '<step type="conclusion">I will now return the answer in \\boxed{}\n'
         f"The answer in \\boxed{{–}} is \\boxed{{{answer}}}</step>"
     )
-    return "\n".join(lines)
+    return wrap_trace_with_think("\n".join(lines))

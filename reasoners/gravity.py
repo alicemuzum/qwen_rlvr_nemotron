@@ -21,6 +21,7 @@ from reasoners.store_types import (
     long_multiplication_lines,
     round_2dp,
     truncate_3dp,
+    wrap_trace_with_think,
 )
 
 
@@ -137,4 +138,4 @@ def reasoning_gravity(problem: Problem) -> str | None:
         '<step type="conclusion">I will now return the answer in \\boxed{}\n'
         f"The answer in \\boxed{{–}} is \\boxed{{{problem.answer}}}</step>"
     )
-    return "\n".join(lines)
+    return wrap_trace_with_think("\n".join(lines))

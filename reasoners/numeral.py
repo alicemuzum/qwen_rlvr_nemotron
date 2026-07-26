@@ -12,7 +12,7 @@ unverified trace.
 
 from __future__ import annotations
 
-from reasoners.store_types import Problem
+from reasoners.store_types import Problem, wrap_trace_with_think
 
 ROMAN_VALUES: list[tuple[int, str]] = [
     (1000, "M"),
@@ -126,4 +126,4 @@ def reasoning_numeral(problem: Problem) -> str | None:
         '<step type="conclusion">I will now return the answer in \\boxed{}\n'
         f"The answer in \\boxed{{–}} is \\boxed{{{problem.answer}}}</step>"
     )
-    return "\n".join(lines)
+    return wrap_trace_with_think("\n".join(lines))

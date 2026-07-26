@@ -232,6 +232,38 @@ def long_multiplication_lines(a_str: str, b_str: str) -> tuple[list[str], str]:
     return lines, result_str
 
 
+def wrap_trace_with_think(trace: str) -> str:
+    """Wrap a completed ``<step>``-tagged trace in a single ``<think>`` block,
+    with the trace's own final boxed answer duplicated *outside* the tags as
+    the model's visible finishing line.
+
+    Every ``reasoning_<task>`` generator calls this on its assembled trace
+    right before returning, so the returned string always has the shape
+    ``<think>\\n<original trace>\\n</think>\\n\\boxed{answer}``. The original
+    trace (including its own internal ``<step type="conclusion">...\\boxed{
+    }...</step>``) is left completely untouched inside the ``<think>`` block,
+    so every ``reward_<task>.py`` -- which scores by regex-matching
+    ``<step type="...">...</step>`` tags wherever they appear in the string --
+    needs no changes.
+
+    The trailing answer is extracted structurally (last ``\\boxed{`` marker to
+    the trace's own final closing brace) rather than via a brace-balancing
+    regex, for the same reason ``scripts/eval_train_csv.py``'s ``last_boxed()``
+    does: cryptarithm's symbol alphabet can itself contain literal "{"/"}"
+    characters that a naive ``\\boxed\\{([^{}]*)\\}`` would mis-parse.
+    """
+    body = trace.rstrip()
+    core = body.removesuffix("</step>")
+    if not core.endswith("}"):
+        raise ValueError("trace does not end in a \\boxed{...} answer")
+    marker = "\\boxed{"
+    idx = core.rfind(marker)
+    if idx == -1:
+        raise ValueError("trace has no \\boxed{...} to extract")
+    answer = core[idx + len(marker) : -1]
+    return f"<think>\n{trace}\n</think>\n\\boxed{{{answer}}}"
+
+
 def long_division_lines(
     numerator_str: str, denominator_str: str, max_decimal_digits: int = 3
 ) -> tuple[list[str], str]:

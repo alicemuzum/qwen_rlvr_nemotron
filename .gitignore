@@ -5,3 +5,6 @@ grpo_cipher/
 *.egg-info/
 .ruff_cache/
 .mypy_cache/
+reasoners_train_csv_eval.csv
+synth_sft.jsonl
+synth_sft.legacy.jsonl

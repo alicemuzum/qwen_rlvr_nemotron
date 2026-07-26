@@ -5,7 +5,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
-from reasoners.store_types import Problem
+from reasoners.store_types import Problem, wrap_trace_with_think
 
 _WONDERLAND_PATH = Path(__file__).parent / "wonderland.txt"
 
@@ -440,4 +440,4 @@ def reasoning_cipher(problem: Problem) -> str | None:
         f'<step type="conclusion">I will now return the answer in \\boxed{{}}\n'
         f"The answer in \\boxed{{–}} is \\boxed{{{computed}}}</step>"
     )
-    return "\n".join(lines)
+    return wrap_trace_with_think("\n".join(lines))

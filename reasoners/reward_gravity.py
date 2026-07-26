@@ -45,6 +45,14 @@ Instead:
   * Penalties are never capped or deduplicated. A trace that never reaches a
     conclusion tag is terminally penalized. Only the *last* conclusion tag
     counts.
+
+The conclusion's boxed answer is graded with a ``1e-2`` numeric tolerance
+rather than exact string equality, mirroring reward_unit_conversion.py: k_fit
+is a median-of-truncated-divisions estimate, not an exact recovery, so the
+final d = k_fit*t^2 can land close to but not byte-identical with the stored
+answer even on a fully correct-method trace. Exact-match grading would
+inject that same rounding-luck noise into the GRPO advantage estimate that
+this module's k_fit-grading discipline above already avoids.
 """
 
 from __future__ import annotations
@@ -72,6 +80,8 @@ _CEILINGS: dict[str, float] = {
 }
 
 _MAX_STEPS = 500
+
+_TOLERANCE = 1e-2 + 1e-9
 
 _MARKER_RE = re.compile(r"^t = (\S+)s, d = (\S+)m:$")
 _KVALUES_RE = re.compile(r"^k values: (.+)$")
@@ -452,13 +462,18 @@ def evaluate_structured_trace(
         elif tag_type == "conclusion":
             saw_conclusion = True
             matches = re.findall(r"\\boxed\{(.*?)\}", content, re.DOTALL)
-            final = matches[-1].strip() if matches else None
-            if final is not None and final == expected_answer:
+            final_str = matches[-1].strip() if matches else None
+            final_val: float | None
+            try:
+                final_val = float(final_str) if final_str is not None else None
+            except ValueError:
+                final_val = None
+            if final_val is not None and abs(final_val - float(expected_answer)) <= _TOLERANCE:
                 total_reward += 10.0
-                reason = "R_terminal_win (correct boxed answer)"
+                reason = "R_terminal_win (boxed answer within tolerance)"
             else:
                 total_reward -= 5.0
-                reason = "R_terminal_fail (incorrect or unboxed answer)"
+                reason = "R_terminal_fail (incorrect, unboxed, or non-numeric answer)"
 
         step_logs.append(
             {

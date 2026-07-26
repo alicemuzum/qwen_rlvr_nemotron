@@ -2,6 +2,13 @@
 
 The output follows the legacy trace style used by the existing reasoning files,
 with a strict-validity filter for candidate assignment vectors.
+
+Emits a ``<step type="...">...</step>`` trace using the same six-tag
+vocabulary as ``cipher.py``/``cryptarithm.py``/``equation_numeric.py`` (plan,
+analysis, state_update, execution, conclusion -- this generator does not use
+``verification``), so ``reward_bit_manipulation.py`` can score it. The tags
+are pure wrapping around the existing narrative text; the underlying
+column-matching / left-right-run selection algorithm is unchanged.
 """
 
 from __future__ import annotations
@@ -9,7 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Literal, Optional, Sequence, Tuple
 
-from reasoners.store_types import Problem
+from reasoners.store_types import Problem, wrap_trace_with_think
 
 N_BITS = 8
 
@@ -333,9 +340,49 @@ def _evaluate_rule(bits: str, rule: RuleCandidate) -> str:
     raise ValueError(f"Unknown family {rule.family}")
 
 
+def parse_rule_expr(expr: str) -> RuleCandidate:
+    """Parse a ``rule.expr`` string (e.g. ``"XOR35"``, ``"NOT4"``, ``"C0"``,
+    ``"I2"``, ``"default 1"``) back into a ``RuleCandidate``.
+
+    Inverse of the expr strings emitted throughout this module. Exposed so
+    ``reward_bit_manipulation.py`` can replay a trace's own declared/applied
+    rule via the same evaluator this module uses, rather than reimplementing
+    the parser.
+    """
+    if expr == "default 1":
+        return RuleCandidate(DEFAULT_FAMILY, None, None, expr)
+    if expr == "C0":
+        return RuleCandidate("0", None, None, expr)
+    if expr == "C1":
+        return RuleCandidate("1", None, None, expr)
+    if expr.startswith("NOT"):
+        return RuleCandidate("NOT", int(expr[3:]), None, expr)
+    if expr.startswith("I"):
+        return RuleCandidate("I", int(expr[1:]), None, expr)
+    for fam in ASYM_FAMILIES:
+        if expr.startswith(fam):
+            digits = expr[len(fam) :]
+            return RuleCandidate(fam, int(digits[0]), int(digits[1]), expr)
+    for fam in SYM_FAMILIES:
+        if expr.startswith(fam):
+            digits = expr[len(fam) :]
+            return RuleCandidate(fam, int(digits[0]), int(digits[1]), expr)
+    raise ValueError(f"Unrecognized rule expr: {expr!r}")
+
+
+def evaluate_rule_expr(bits: str, expr: str) -> str:
+    """Evaluate a ``rule.expr`` string against an 8-bit string.
+
+    Bit-identical wrapper around ``_evaluate_rule`` via ``parse_rule_expr``,
+    exposed for ``reward_bit_manipulation.py``.
+    """
+    return _evaluate_rule(bits, parse_rule_expr(expr))
+
+
 def _emit_apply(
     lines: List[str], question_bits: str, vector: List[RuleCandidate]
 ) -> None:
+    lines.append('<step type="execution">')
     lines.append(f"Applying to {question_bits}")
     lines.append("Input")
     for i, bit in enumerate(question_bits):
@@ -380,9 +427,12 @@ def _emit_apply(
         lines.append(f"{i} {rule.expr} = {base}({a},NOT({b})) = {result}")
         answer_bits.append(result)
 
+    lines.append("</step>")
     lines.append("")
-    lines.append("I will now return the answer in \\boxed{}")
-    lines.append(f"The answer in \\boxed{{–}} is \\boxed{{{''.join(answer_bits)}}}")
+    lines.append(
+        '<step type="conclusion">I will now return the answer in \\boxed{}\n'
+        f"The answer in \\boxed{{–}} is \\boxed{{{''.join(answer_bits)}}}</step>"
+    )
 
 
 def reasoning_bit_manipulation(problem: Problem) -> Optional[str]:
@@ -525,13 +575,16 @@ def reasoning_bit_manipulation(problem: Problem) -> Optional[str]:
     lines: List[str] = []
 
     # 1) header
+    lines.append('<step type="plan">')
     lines.append(
         "We need to deduce the transformation by matching the example outputs."
     )
     lines.append("I will put my final answer inside \\boxed{}.")
+    lines.append("</step>")
     lines.append("")
 
     # 2) output examples
+    lines.append('<step type="analysis">')
     for i, out in enumerate(outputs):
         lines.append(f"Output {i}: {out}")
         for bit in range(N_BITS):
@@ -552,8 +605,10 @@ def reasoning_bit_manipulation(problem: Problem) -> Optional[str]:
         for bit in range(N_BITS):
             lines.append(f"{bit} {inp[bit]}")
         lines.append("")
+    lines.append("</step>")
 
     # 5) Operation sections (raw data + matching + LRM)
+    lines.append('<step type="analysis">')
     lines.append("When matching output")
     lines.append("x: not in operator")
     lines.append("y: wrong position")
@@ -616,8 +671,10 @@ def reasoning_bit_manipulation(problem: Problem) -> Optional[str]:
 
     for name in all_records:
         _add_section(name)
+    lines.append("</step>")
 
     # 7) Selecting rule block.
+    lines.append('<step type="analysis">')
     lines.append("Selecting")
     lines.append("")
 
@@ -1007,17 +1064,20 @@ def reasoning_bit_manipulation(problem: Problem) -> Optional[str]:
         else:
             lines.append(f"{i} {best[i].expr}")
     lines.append("")
+    lines.append("</step>")
 
     # Check if we have any non-default rules
     if all(r.is_default for r in best):
         return None
 
+    lines.append('<step type="state_update">')
     lines.append("Selected")
     for i, rule in enumerate(best):
         lines.append(f"{i} {rule.expr}")
+    lines.append("</step>")
 
     # 8) Apply to question.
     lines.append("")
     _emit_apply(lines, question_bits, best)
 
-    return "\n".join(lines)
+    return wrap_trace_with_think("\n".join(lines))
