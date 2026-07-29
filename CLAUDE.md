@@ -44,6 +44,10 @@ uv sync                                          # install deps into .venv (edit
 uv run python kaggle/train_grpo_cipher_kaggle.py # GRPO training, runs locally (falls back off /kaggle/input)
 uv run python kaggle/train_sft_kaggle.py --dry-run # SFT: build+report the dataset from synth_sft.jsonl, no GPU needed
 uv run python kaggle/train_sft_kaggle.py         # SFT training (stage 2); --help for the CLI overrides
+uv run python kaggle/train_sft_tinker.py --dry-run # SFT (stage 2) on Thinking Machines' hosted Tinker API instead of a local GPU, no network call
+uv run python kaggle/train_sft_tinker.py --yes   # real (paid) Tinker training run; see "The Tinker SFT training script" below before running
+uv run python kaggle/train_grpo_tinker.py --dry-run # GRPO (stage 3) pre-flight checks against the full_0727 SFT checkpoint, no network call
+uv run python kaggle/train_grpo_tinker.py --yes  # real (paid) Tinker GRPO run; see "The GRPO training script" below before running
 uv run python -m reasoners.monitor_cipher        # generate+score one random cipher trace, print step-by-step reward log
 uv run python -m reasoners.monitor_cryptarithm   # generate+score one random cryptarithm trace, same style
 uv run python -m reasoners.monitor_gravity       # generate+score one random gravity trace, same style
@@ -558,14 +562,15 @@ bullet under "Why the reward functions are shaped differently").
   `monitor_equation_numeric.py`. Measured: 230/300 real rows solved, 0
   wrong.
 - All seven categories now have reward functions and `monitor_*` scripts
-  (see "Two kinds of reasoner module"). Only `cipher` has a GRPO training
-  script (`kaggle/train_grpo_cipher_kaggle.py`) -- cryptarithm, gravity,
-  numeral, unit_conversion, equation_numeric, and bit_manipulation have the
-  reward/generator infrastructure GRPO needs but no training script wired
-  up yet; extending it to any of them means cloning the cipher script's
-  structure (dataset builder using the category's `monitor_*.py` problem
-  constructor + a thin reward-function adapter + `GRPOTrainer` wiring),
-  substituting that category's 3-arg (no-oracle) reward call.
+  (see "Two kinds of reasoner module"). `cipher` has a local/Kaggle GRPO
+  script (`kaggle/train_grpo_cipher_kaggle.py`, TRL `GRPOTrainer`); the
+  other six now have a hosted-Tinker GRPO script
+  (`kaggle/train_grpo_tinker.py`, see "The GRPO training script" below)
+  that continues training from the `full_0727` SFT checkpoint, defaulting
+  to `numeral` + `equation_numeric` per ROADMAP Step 7. Neither script has
+  had a real paid run yet -- `train_grpo_tinker.py --dry-run` is verified
+  (see its section), but the actual `forward_backward`/`optim_step` loop
+  has not been exercised against the live service.
 - `bit_manipulation` now has a tagged generator, `reward_bit_manipulation.py`,
   and `monitor_bit_manipulation.py` (**all uncommitted in git as of this
   writing** -- `reasoners/bit_manipulation.py` is modified but not
@@ -581,13 +586,17 @@ bullet under "Why the reward functions are shaped differently").
   known synthetic answer), but `reasoning_bit_manipulation` itself still
   needs the `answer == problem.answer` gate added before it can be trusted
   as an SFT source the way `equation_numeric.py`'s fix was.
-- **The SFT training script now exists** (stage 2 of the three-stage plan
-  under "Project goal"): `kaggle/train_sft_kaggle.py`, added this session and
-  uncommitted in git as of this writing. See "The SFT training script" below
-  for what it does and the two live caveats (session length, SFT -> GRPO
-  handoff). The remaining stage-2 gap is not the script but the
-  synthetic-vs-real equation_numeric operator-count mismatch found while
-  auditing (fixed in the generator, see the audit section).
+- **Two SFT training scripts now exist** (stage 2 of the three-stage plan
+  under "Project goal"): `kaggle/train_sft_kaggle.py` (local/Kaggle GPU) and
+  `kaggle/train_sft_tinker.py` (Thinking Machines' hosted Tinker API), both
+  uncommitted in git as of this writing. See "The SFT training script" and
+  "The Tinker SFT training script" below. The local script's remaining
+  stage-2 gap is not the script but the synthetic-vs-real equation_numeric
+  operator-count mismatch found while auditing (fixed in the generator, see
+  the audit section). The Tinker script has since completed a full default
+  run against the live service (`sft_tinker_runs/full_0727/`) confirming the
+  step-tag format is actually learnable, not just internally consistent;
+  its one open gap is no resume-from-checkpoint path (see its section).
 - `reasoners/dictionary.txt` is present but not currently imported by any
   solver -- `wonderland.txt` (77 words) is the word list actually used by
   `cipher.py`/`reward_cipher.py`.
@@ -864,3 +873,365 @@ Two caveats that are the operator's call, not bugs:
 Not yet validated: only the bf16 path has been exercised end-to-end (the
 fp16/T4 branch is written but untested), and no generation smoke test
 (sample a val prompt, eyeball the emitted format) exists in the script.
+
+## The Tinker SFT training script
+
+`kaggle/train_sft_tinker.py` (untracked) is a second stage-2 entry point:
+the same LoRA-SFT-on-`synth_sft.jsonl` job as `train_sft_kaggle.py`, but
+trained on Thinking Machines' hosted Tinker API (`tinker` 0.23.4 +
+`tinker-cookbook` 0.5.2, the `tinker` extra in `pyproject.toml`) instead of a
+local/Kaggle GPU -- no torch/peft needed for this path, since Tinker runs the
+model server-side. It reuses `train_sft_kaggle.py`'s data prep
+(`load_rows`/`build_examples`/`stratified_split`) directly rather than
+reimplementing it.
+
+It was audited before its first real run and found to mix in call shapes
+from `huikang_nemotron/trainer/client.py`, a **wrapper** around the Tinker
+SDK that this script was originally drafted against instead of the raw SDK
+-- see [[tinker-sdk-vs-wrapper-api]] for the full drift list. All three
+defects sat *after* the billed training loop, so an unfixed run would have
+spent the money and persisted nothing:
+
+1. **No working checkpoint save.** The wrapper's
+   `save_checkpoint_async(name, log_path)` doesn't exist on the real
+   `TrainingClient`. Fixed with a `save_checkpoint()` helper that calls the
+   SDK's actual `save_state_async` + `save_weights_for_sampler_async`,
+   invoked periodically (`Cfg.save_every_steps = 10`) and from a
+   try/except around the whole run so a mid-run crash still saves an
+   `"interrupted"` checkpoint before re-raising. Paths land in
+   `<log_dir>/checkpoints.jsonl`.
+2. **`APIFuture` never unwrapped** at two `save_weights_for_sampler_async`
+   call sites (a `getattr(result, "path", result)` fallback silently
+   returned the future itself), and `sample_async` was missing the
+   required `num_samples` argument. Both fixed.
+3. **The smoke test's format checks were structurally wrong** --
+   `"\boxed{" in completion` is near-vacuous (every gold trace's *plan*
+   step contains boilerplate "I will put my final answer inside \boxed{}"
+   ~150 chars in, regardless of correctness) and `"<think>" in completion`
+   is a guaranteed false negative (`build_examples` strips the chat
+   template's leading `<think>\n`, so a perfect completion never contains
+   an opening tag). Fixed to check the completion alone: `</think>`
+   present, `<think>` absent, and `\boxed{` only counted if it falls in the
+   tail *after* `</think>` (guarding `str.rpartition`, which returns the
+   whole string when the separator is absent). See
+   [[step-tag-format-check-pitfalls]] for the full reasoning.
+
+All three were confirmed against the real installed SDK, not assumed from
+the sibling wrapper repo (0.16.1 there vs. 0.23.4 here).
+
+**Verified against the live service, cheapest first.** A `--limit 4 --epochs
+1 --yes` rehearsal (~$0.08) exercised every post-loop path end to end: real
+`tinker://` checkpoint paths, sampling, `weights.download`, and a full
+`build_hf_model` merge (8.8 GB, 738 tensors, no LoRA leftovers). Then a full
+default-config run completed (`sft_tinker_runs/full_0727/`, 2026-07-27):
+1376 train / 73 val rows (1 dropped for length), 4,043,134 train tokens
+(~$2.98), 22 optimizer steps. `_loss_per_token` dropped monotonically
+0.334 -> 0.016 across the run, and hard per-category too (e.g.
+`equation_numeric` 1.49 -> 0.046, `unit_conversion` 0.16 -> 0.0008). All 3
+sampled smoke-test completions (`numeral` x2, `cryptarithm`) came back
+`closed_think=True final_boxed=True stop=stop` -- a natural EOS with the
+format correctly closed and boxed, not truncated mid-trace. This is the
+first evidence the six-tag/`<think>`/`\boxed{}` format is actually learnable
+through this pipeline, not just internally consistent on synthetic gold
+traces and reward functions. Export produced a 279 MB adapter plus an 8.8 GB
+merged HF model at `sft_tinker_runs/full_0727/merged_hf_model`
+(`Qwen3_5ForConditionalGeneration`, no LoRA leftovers).
+
+**Open gap: no resume path.** The script never calls the SDK's
+`load_state_async` (it exists on `TrainingClient`; grep finds zero uses
+here). Periodic/interrupted checkpoints exist as `tinker://` paths in
+`checkpoints.jsonl` and survive the local process dying, but restarting
+after a crash means training from step 0 again at full cost -- there's no
+`--resume-from` flag to pick up a saved checkpoint. Worth adding before
+relying on this for a run long enough to risk interruption.
+
+**Operational note, not a script bug:** unlike a Kaggle GPU job, Tinker runs
+the model server-side but this script's own process drives the loop --
+it issues each step's request and blocks on the result, so the machine
+running it must stay powered on and connected for the whole run (sleep
+breaks it; closing the terminal doesn't if launched with `nohup`/`tmux`).
+Each run's export is a full 8.8 GB local copy under `sft_tinker_runs/`
+(now gitignored, along with `.env`); prune old `merged_hf_model/` dirs
+there if disk is a concern -- the 279 MB `adapter/` alone is enough to
+rebuild the merge offline with `tinker_cookbook.weights.build_hf_model`,
+no API call needed.
+
+Not yet done: `train_sft_tinker.py` has no `--resume-from` (see above), and
+like the local script, SFT -> GRPO chaining is unwired (prompt-format
+mismatch with `train_grpo_cipher_kaggle.py`, and that script would need
+pointing at a merged checkpoint or adapter here).
+
+## The GRPO training script
+
+`kaggle/train_grpo_tinker.py` (added this session, untracked) is stage 3 for
+six of the seven categories: it continues training from the `full_0727` SFT
+checkpoint (see "The Tinker SFT training script") using
+`tinker_cookbook.rl.train.Config` + `main()` -- the hosted RL loop, not TRL's
+`GRPOTrainer` (`train_grpo_cipher_kaggle.py`'s stack, which targets a
+different, much smaller local model). This is a platform constraint, not a
+preference: the merged SFT model is 9.3 GB bf16 and the local GPU is 5.67
+GiB, so GRPO has to run where SFT did.
+
+**Design, in one paragraph:** for each enabled category,
+`ReasonerDatasetBuilder` loads `synth_sft.jsonl`, subtracts every row
+`full_0727`'s SFT run would have seen (reproducing
+`train_sft_kaggle.apply_category_caps(seed=0)` with that run's own
+`category_caps`, keyed on `(category, id)` -- a small conservative
+superset of the exact train split, see `sft_holdout_keys`'s docstring for
+why exact reconstruction isn't worth it), parses each prompt's examples via
+`scripts/eval_train_csv.PARSERS`, and hands batches of
+`ProblemGroupBuilder`-wrapped `ReasonerEnv` instances to the training loop.
+`ReasonerEnv` subclasses `tinker_cookbook.rl.types.Env` **directly, not
+`ProblemEnv`** -- `ProblemEnv.step` reads the sampled response through
+`renderers.get_text_content()`, which strips `<think>` content, and the
+entire `<step>`-tagged trace lives inside `<think>...</think>` (see
+`store_types.wrap_trace_with_think`). Reward text is built as
+`think_prefix + tokenizer.decode(action_with_stop_token_stripped)`:
+`think_prefix` is derived from `train_sft_kaggle.chat_template_think_prefix`
+(the same function that decided what SFT stripped) rather than hardcoded, and
+the stop-id token is stripped from `action` before decoding because
+`renderer.get_stop_sequences()` returns a token id that Qwen3's own
+`parse_response` docstring confirms is present in the raw sampled tokens --
+left in place it decodes to literal `<|im_end|>` text glued onto the
+completion. `evaluate_structured_trace`'s own correctness grading turns out
+to be immune to this (it locates the boxed answer inside the conclusion
+tag's regex-captured content, bounded by that step's own `</step>`, so
+trailing garbage after it is inert -- confirmed empirically, see below), but
+the `correct` *metric* and any code using `scripts/eval_train_csv.last_boxed`
+on the full text is not, since that helper requires the string to literally
+end in `}`. The reward call is wrapped in `try/except Exception -> raw =
+-reward_clip`, since `reward_gravity.py`/`reward_unit_conversion.py` call
+bare `float()` on regex-captured (adversarial) trace content and can raise
+on malformed model output.
+
+**Cipher is deliberately excluded** (`REWARDS` has no `"cipher"` entry).
+`reward_cipher.evaluate_structured_trace` takes `(text, oracle_map,
+expected_words)`, not `(text, examples, expected_answer)`, and grades letter
+claims via `oracle_map.get(cipher) == plain` -- a key missing from a partial
+oracle scores as *wrong*, not unknown. A real/synthetic-corpus row's handful
+of example sentences never covers the full 26-letter bijection that reward
+function needs; only a bijection-first construction (`monitor_cipher.py`'s
+pattern, same as `train_grpo_cipher_kaggle.py` already does) can supply a
+complete oracle. Wiring cipher in means a second env/dataset path built that
+way, not reusing `ReasonerEnv`.
+
+**All five `--dry-run` pre-flight checks are implemented and have been run
+(2026-07-28), $0, no Tinker client constructed.** The first four call
+`REWARDS[cat](...)` directly and never exercise `ReasonerEnv` itself (stop-id
+stripping, the `think_prefix + decode(...)` concatenation, `rpartition(
+"</think>")`, `eval_csv.last_boxed(tail)`, `StepResult` construction) -- a
+gap closed by the fifth:
+- `_check_sft_holdout`: default categories (`numeral`, `equation_numeric`)
+  each have 2000 rows, 300 held out (matching `full_0727`'s
+  `category_caps`), 1700 available for GRPO.
+- `_check_gold_trace_rewards` (200 gold rows/category): **zero negative
+  scores** for all six non-cipher categories, and **zero
+  `stop_text_mismatches`** -- appending the renderer's decoded stop token to
+  a gold trace before scoring never changed the reward, confirming the
+  conclusion-tag-scoped boxed-answer extraction really is immune to trailing
+  stop-token text. Measured gold-reward ranges (min/p50/max): numeral
+  19.95/22.15/23.85, equation_numeric 2.90/17.95/21.00, cryptarithm
+  12.07/27.61/28.46, gravity 20.35/25.10/25.10, unit_conversion
+  20.45/23.05/24.70, bit_manipulation 14.75/14.75/14.75 (constant --
+  consistent with its rows surviving via `monitor_bit_manipulation.py`'s
+  retry-until-match loop landing on a narrow set of rule shapes, see "Two
+  kinds of reasoner module"). `Cfg.reward_clip = 25.0` was chosen from this
+  distribution so gold numeral traces land just under the ceiling (~0.95)
+  rather than saturating at 1.0.
+- `_check_prompt_token_identity`: **byte-identical** -- 288 tokens match
+  exactly between `train_sft_kaggle.render_prompt` (what SFT trained on) and
+  `renderers.get_renderer("qwen3_5", ...).build_generation_prompt(...)` for
+  the same messages, and the derived `think_prefix` (`'<think>\n'`) matches
+  the renderer's own generation-prompt tail. The Qwen3.5 renderer's claimed
+  HF-template parity holds for this project's prompts.
+- `_check_trace_length_percentiles` (Qwen3.5-4B tokenizer, trace tokens
+  only): numeral p50/p95/max = 496/615/702, equation_numeric =
+  342/415/469 -- both comfortably under `Cfg.max_tokens = 1280` (chosen at
+  ~1.8x the observed max, not just p95, so an early-training policy rambling
+  past gold length doesn't get truncated and penalized as a confound). The
+  other four categories were also checked at `--max-tokens 8192`: cryptarithm
+  1588/1663/1728, gravity 5861/7435/8073, unit_conversion 5303/7280/8025,
+  bit_manipulation 6691/6991/7826 -- all pass every check, so enabling them
+  later (`--categories cryptarithm,gravity,unit_conversion,bit_manipulation`)
+  needs only a `--max-tokens` bump, per ROADMAP Step 8.
+- `_check_env_step_closed_loop`: builds a real `ReasonerEnv`, feeds it a
+  gold trace turned back into a synthetic sampled `action` (the trace with
+  `think_prefix` stripped, re-tokenized, plus the stop-id token appended --
+  simulating exactly what a `stop_reason == "stop"` sample looks like), and
+  drives it through `initial_observation()` + `step()`. All six categories
+  came back `format=1.0 correct=1.0 truncated=0.0` with positive reward
+  (0.59-1.00, reflecting `Cfg.reward_clip`'s squash of each category's own
+  gold-reward ceiling -- see the ranges above). `initial_observation()`'s
+  `ModelInput.to_ints()` was also asserted equal to the SFT prompt tokens
+  for the same row, closing `_check_prompt_token_identity`'s gap of testing
+  the renderer directly rather than the env's actual use of it. The
+  `correct` metric is tolerance-aware (`_boxed_matches`, `1e-2` for
+  `gravity`/`unit_conversion` only, exact match otherwise) to match those
+  two reward functions' own documented tolerance (see "Why the reward
+  functions are shaped differently") -- without this, `correct` would
+  under-report on the ~2% of gravity/unit_conversion rows whose gold trace
+  is a near-exact (not byte-exact) reconstruction. A caught reward-function
+  exception (trap 5) also sets a `reward_exception` metric distinct from
+  `reward_raw == -reward_clip`, since a crashing reward function and a
+  genuinely terrible completion would otherwise look identical in the logs.
+
+### How this was verified (source-level, against the installed package)
+
+`plan_grpo.txt` (pre-existing in the repo before this session, presumably
+from an earlier planning pass) named specific file:line claims about
+`tinker_cookbook` 0.5.2 / `tinker` 0.23.4's behavior. Before writing any
+code, every one of those claims was checked by reading the actually
+*installed* package in `.venv/lib/python3.11/site-packages/`, not assumed
+from the plan or from upstream docs (versions drift -- the Tinker SFT
+script's own docstring already documents one earlier draft going stale
+against a sibling repo's wrapper, see "The Tinker SFT training script").
+Specifically read and confirmed:
+
+- `tinker_cookbook/rl/types.py`: `Env`/`EnvGroupBuilder`/`StepResult`/
+  `Action`/`ActionExtra`/`RLDataset`/`RLDatasetBuilder` signatures; the
+  `Env` docstring's own worked example, which returns a bare `(observation,
+  stop_condition)` tuple from `initial_observation` -- confirming
+  `renderer.build_generation_prompt(...)` returns a plain `ModelInput`, not
+  a tuple, in this installed version (a detail `ProblemEnv.initial_
+  observation` itself constructs the tuple around).
+- `tinker_cookbook/rl/problem_env.py`: `ProblemEnv.step`'s exact body,
+  confirming the `renderers.get_text_content(message)` call (trap 1) and
+  that `ProblemGroupBuilder` is a plain (non-`chz`) dataclass whose
+  `env_thunk: Callable[[], ProblemEnv]` type hint is not runtime-enforced --
+  confirmed by construction (`ReasonerEnv` is not a `ProblemEnv` subclass
+  and `ProblemGroupBuilder(env_thunk=partial(ReasonerEnv, ...))` still
+  works, since `make_envs` just calls the thunk).
+- `tinker_cookbook/renderers/base.py`: `get_text_content`'s docstring and
+  body (strips `ThinkingPart`s); `Renderer.tokenizer` is a real public
+  attribute (`self.tokenizer = tokenizer` in `__init__`); `build_generation_
+  prompt`'s actual return type.
+- `tinker_cookbook/renderers/qwen3.py` / `qwen3_5.py`: `get_stop_sequences`
+  returns `[self._end_message_token]` (a token id, not a string);
+  `Qwen3_5Renderer._get_generation_suffix` appends literal `"<think>\n"`;
+  `Qwen3Renderer.parse_response`'s docstring says it "decodes the response,
+  strips the `<|im_end|>` stop token" -- the textual basis for trap 3 (see
+  below for why this is an inference, not a live-verified fact).
+- `tinker_cookbook/rl/data_processing.py`: `compute_advantages`'s exact
+  body -- confirms group-centering only, no std division, so raw reward
+  magnitude scales the gradient directly (motivates `reward_clip`).
+- `tinker_cookbook/recipes/math_rl/math_env.py` and `train.py`: read in
+  full as the closest existing analogue (a single-turn verifiable-reward
+  recipe) -- `MathDataset`/`MathDatasetBuilder`/`ProblemGroupBuilder` usage,
+  and `cli_main`'s exact `Config(...)` construction, which
+  `train_grpo_tinker.run_training` mirrors field-for-field (recipe_name,
+  renderer_name resolution, load_checkpoint_path, async_config left unset,
+  etc.).
+- `tinker_cookbook/rl/train.py`: `Config`/`AsyncConfig`/
+  `StreamMinibatchConfig` field lists (confirmed `base_url`, `ttl_seconds`,
+  `rollout_error_tolerance` etc. exist so future tuning has real field
+  names to reach for); `main()`'s body around line 1930-1966, confirming
+  `load_checkpoint_path` goes through `create_training_client_from_state_
+  async` (fresh optimizer state) rather than `create_training_client_from_
+  state_with_optimizer_async` (which is reserved for *resuming* an
+  interrupted run of the GRPO script itself, detected via `checkpoint_
+  utils.get_last_checkpoint(config.log_path)` -- not relevant to loading an
+  SFT checkpoint as a starting point).
+- `tinker_cookbook/checkpoint_utils.py`: `resolve_renderer_name_from_
+  checkpoint_or_default_async`'s exact signature and precedence (explicit
+  name wins; else checkpoint metadata; else `model_info`'s recommendation).
+- `tinker_cookbook/cli_utils.py`: `LogdirBehavior` literal values and
+  `check_log_dir`'s signature.
+- `tinker` (the base SDK, not cookbook): `types/_pydantic_types/sampling_
+  params.py` (`SamplingParams.stop: Union[str, Sequence[str], Sequence[int],
+  None]`) and `types/sampled_sequence.py`/`stop_reason.py` (`StopReason =
+  Literal["length", "stop"]`) -- read directly since neither confirms nor
+  contradicts whether a stop *token id* passed as `stop` ends up included in
+  the returned `.tokens`; this remains an inference from the renderer
+  docstring, not a directly-confirmed SDK behavior (see below).
+- Constructed a real `tinker.ModelInput` interactively (`uv run python -c
+  "..."`) to confirm `.chunks`/`.to_ints()`/`.length` exist and behave as
+  expected, and constructed a real `ReasonerDatasetBuilder(...)` instance to
+  confirm `chz.chz` accepts `tuple[str, ...]` and `dict`-typed fields (it
+  does, matching how `Config.loss_fn_config: dict[str, Any] | None` and
+  `CLIConfig.env: str` etc. are declared elsewhere in the installed package).
+
+This is the same discipline CLAUDE.md already asks for elsewhere in this
+project (`_factor_for_example` bit-identical between generator and reward,
+etc.) applied to a third-party dependency: don't trust a plan's or a
+docstring's claim about library behavior without reading the installed
+source, and where reading isn't conclusive, run the smallest possible
+snippet that would falsify it.
+
+### Assumptions this design rests on that were *not* independently verified
+
+Everything below was either inferred from a docstring/type rather than
+observed behavior, or is a deliberate judgment call recorded here so it
+isn't re-litigated silently later:
+
+- **Stop-token inclusion in sampled output (trap 3) is an inference, not an
+  observed fact.** No live `sample_async` call was made (that needs a
+  `tinker.ServiceClient` and bills the sampling meter), so whether
+  `stop_reason == "stop"` sampled tokens actually include the stop-id token
+  was never directly observed -- it rests entirely on
+  `Qwen3Renderer.parse_response`'s docstring wording ("decodes the
+  response, strips the `<|im_end|>` stop token"). `ReasonerEnv.step`'s
+  stripping is written defensively either way (a no-op if the token turns
+  out to already be absent, since `toks[-1] in self._stop_ids` just won't
+  match), so this assumption being wrong would not break anything -- but it
+  is worth re-examining directly on the first real rollout's raw token IDs
+  before trusting it further.
+- **`renderer_name="qwen3_5"` for the dry-run checks is a hardcoded guess,
+  not resolved from the checkpoint.** The real run instead calls
+  `checkpoint_utils.resolve_renderer_name_from_checkpoint_or_default_async`
+  against the live service (`run_training`, not `--dry-run`'s path) --
+  correct for `full_0727` (a stock Qwen3.5-4B LoRA with no custom
+  renderer registered), but this has not been confirmed against the
+  checkpoint's actual stored metadata, only assumed consistent with how it
+  was trained.
+- **The SFT-holdout subtraction is a deliberately conservative
+  approximation, not an exact train/test partition** (see
+  `sft_holdout_keys`'s docstring): it excludes ~74 more rows than `full_
+  0727` actually trained on (the val split + 1 length-dropped row), because
+  reconstructing the exact boundary would require re-running SFT's own
+  tokenizer-dependent `build_examples`/`stratified_split` for a benefit
+  (a few dozen more available rows out of ~1700/category) judged not worth
+  the complexity.
+- **`Cfg.reward_clip = 25.0` and `Cfg.max_tokens` (1280 default; 8192 when
+  the other four categories are enabled) are chosen from the *gold-trace*
+  reward/length distributions**, not from any real policy rollout (none
+  exist yet). An actual early-training policy may ramble longer or shorter
+  than gold traces in ways this can't predict; both are `Cfg` knobs
+  specifically so they can be revisited after the first smoke run's real
+  data, per `_check_trace_length_percentiles`'s own comment.
+- **Hyperparameters copied from `plan_grpo.txt` are starting points, not
+  tuned values**: `learning_rate=1e-5`, `group_size=8`,
+  `groups_per_batch=8`, `save_every=5`, `kl_penalty_coef=0.0`,
+  `remove_constant_reward_groups=True`, `num_substeps=1`. None of these were
+  swept or justified beyond "matches the plan's own reasoning" (RL learning
+  rate an order of magnitude below SFT's, KL off initially to see the
+  unconstrained reward signal first).
+- **No sampling-meter price is on file** (`Cfg.sample_price_per_m_tokens`
+  defaults `None`, unlike `train_sft_tinker.py`'s verified `TRAIN_PRICE_
+  PER_M_TOKENS`) -- the cost estimate this script prints before any paid
+  call is a token count only, not a dollar figure, until a real price is
+  supplied via `--sample-price-per-m-tokens` or looked up at
+  https://tinker-docs.thinkingmachines.ai/tinker/models/.
+- **This session's advisor review caught a real gap**, worth recording as
+  process, not just outcome: the first draft of the `--dry-run` checks
+  (SFT-holdout, gold-trace rewards, prompt-token-identity, trace-length
+  percentiles) all scored gold traces by calling `REWARDS[cat](...)`
+  directly, never actually constructing a `ReasonerEnv` or calling
+  `.step()` -- so none of them exercised the stop-token-stripping,
+  `think_prefix` concatenation, or `StepResult`/metrics code that the real
+  paid run depends on. `_check_env_step_closed_loop` (added after that
+  review, see the checklist above) closes that gap; the takeaway for future
+  work on this file is that scoring a reward function in isolation is not
+  the same as verifying the environment wrapper around it.
+
+**Not yet done: no paid run.** The `--dry-run` path above is fully verified;
+`--yes`/interactive-confirm and the actual `forward_backward`/`optim_step`
+loop (`run_training`, which resolves the renderer name from the checkpoint's
+own metadata via `checkpoint_utils.resolve_renderer_name_from_checkpoint_or_
+default_async` rather than hardcoding `"qwen3_5"`) have not been exercised
+against the live service. Per ROADMAP Step 4's "deliberate smoke run"
+guidance, the first real invocation should be small (`--max-steps 2
+--groups-per-batch 4 --group-size 4`) before a longer run. There is also no
+sampling-meter price on file (`Cfg.sample_price_per_m_tokens` defaults
+`None`); the cost estimate prints token counts only until that's supplied via
+`--sample-price-per-m-tokens` or looked up at
+https://tinker-docs.thinkingmachines.ai/tinker/models/.

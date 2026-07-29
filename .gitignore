@@ -8,3 +8,11 @@ grpo_cipher/
 reasoners_train_csv_eval.csv
 synth_sft.jsonl
 synth_sft.legacy.jsonl
+.env
+sft_tinker_runs/
+report/
+REPORT_INSTRUCTIONS.md
+ROADMAP.md
+sft_tinker_train_csv_eval.csv
+sft_tinker_train_csv_eval.manifest.json
+plan_grpo.txt

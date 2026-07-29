@@ -14,8 +14,18 @@ dependencies = [
     "datasets>=3.0.0",
 ]
 
+[project.optional-dependencies]
+# Stage-2 SFT via the Tinker hosted API (kaggle/train_sft_tinker.py) instead
+# of a local GPU. Kept optional since it needs no torch/peft/bitsandbytes
+# stack and most of this repo's other entry points don't touch it.
+tinker = [
+    "tinker>=0.16.1",
+    "tinker-cookbook>=0.3.0",
+]
+
 [dependency-groups]
 dev = [
+    "matplotlib>=3.11.1",
     "pytest>=8.4.2",
     "ruff>=0.13.2",
 ]

@@ -94,9 +94,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import statistics
 import sys
+import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -120,9 +122,13 @@ if not INPUT_DIR.exists():
 
 @dataclass
 class Cfg:
-    model_name: str = "Qwen/Qwen3-0.6B"  # matches the GRPO script's default
+    model_name: str = "Qwen/Qwen3.5-0.8B"  # was Qwen/Qwen3-0.6B (GRPO script's default)
     data_file: str = "synth_sft.jsonl"
     output_dir: str = "/kaggle/working/sft_reasoners"
+    # Per-step-window training metrics (loss/token + min-logprob by category,
+    # grad norm, lr, step time), one JSON line per `logging_steps` window --
+    # see _make_chunked_loss_trainer(). Written to output_dir/metrics_file.
+    metrics_file: str = "metrics.jsonl"
 
     prompt_style: str = "chat"  # "chat" (tokenizer chat template) | "raw"
 
@@ -433,6 +439,13 @@ def _make_chunked_loss_trainer(trainer_cls):
     recomputed during backward, making peak loss memory proportional to the
     chunk, not the sequence. Everything else (LoRA, gradient checkpointing on
     the transformer body) is unchanged.
+
+    This class also accumulates per-category loss/token and min-logprob
+    (min over trained tokens of the model's log-prob for the *correct* token
+    -- a worst-case-confidence signal, same definition used by the reference
+    `nemotron` metrics dashboard this was modeled after) and flushes them to
+    `Cfg.metrics_file` via a `log()` override, once per `logging_steps`
+    window rather than per micro-step -- see `log()` below for why.
     """
     import torch
     import torch.nn.functional as F
@@ -440,12 +453,26 @@ def _make_chunked_loss_trainer(trainer_cls):
 
     class ChunkedLossTrainer(trainer_cls):
         _checked_gc = False
+        metrics_path = None  # set externally by main() after construction
 
         def compute_loss(
             self, model, inputs, return_outputs=False, num_items_in_batch=None
         ):
+            if not hasattr(self, "_cat_loss_sum"):
+                # Lazy init (avoids overriding __init__'s many passthrough
+                # kwargs). Kept as on-device tensors, not Python floats/ints
+                # -- converting every micro-step would force a host sync 16x
+                # more often than Trainer's own logging cadence needs.
+                self._cat_loss_sum: dict[str, torch.Tensor] = {}
+                self._cat_tokens: dict[str, torch.Tensor] = {}
+                self._cat_min_logprob: dict[str, torch.Tensor] = {}
+                self._last_log_time = time.time()
+                self._last_log_step = 0
+
             inputs = dict(inputs)
             labels = inputs.pop("labels")
+            category = inputs.pop("category", None)
+            is_train = torch.is_grad_enabled()  # False during Trainer's eval loop
 
             # Reach past the PEFT wrapper to the causal-LM, then run its body
             # only -- calling the causal-LM itself would compute the very
@@ -463,7 +490,11 @@ def _make_chunked_loss_trainer(trainer_cls):
                 self._checked_gc = True
                 print(
                     "gradient checkpointing active on transformer body: "
-                    f"{getattr(body, 'gradient_checkpointing', None)}"
+                    f"{getattr(body, 'gradient_checkpointing', None)} "
+                    f"body.training={body.training} model.training={model.training} "
+                    f"use_cache(causal_lm/body)={causal_lm.config.use_cache}/"
+                    f"{body.config.use_cache} "
+                    f"output_hidden_states={body.config.output_hidden_states}"
                 )
 
             hidden = body(**inputs).last_hidden_state
@@ -472,14 +503,24 @@ def _make_chunked_loss_trainer(trainer_cls):
 
             def chunk_loss(h, y):
                 logits = lm_head(h).float()
-                return F.cross_entropy(
-                    logits.reshape(-1, logits.size(-1)),
-                    y.reshape(-1),
-                    ignore_index=-100,
-                    reduction="sum",
+                flat_logits = logits.reshape(-1, logits.size(-1))
+                flat_y = y.reshape(-1)
+                loss_sum = F.cross_entropy(
+                    flat_logits, flat_y, ignore_index=-100, reduction="sum"
                 )
+                # Diagnostic only, no grad -- doesn't affect backward, just
+                # rides along in the same (checkpointed) forward pass so this
+                # doesn't cost a second one over the full sequence.
+                with torch.no_grad():
+                    valid = flat_y != -100
+                    token_logprob = F.log_softmax(flat_logits[valid], dim=-1).gather(
+                        1, flat_y[valid].unsqueeze(1)
+                    )
+                    chunk_min_logprob = token_logprob.min()
+                return loss_sum, chunk_min_logprob
 
             total = shift_hidden.new_zeros((), dtype=torch.float32)
+            min_logprob = None
             step = CFG.loss_chunk_size
             for start in range(0, shift_hidden.size(1), step):
                 h = shift_hidden[:, start : start + step, :]
@@ -487,9 +528,32 @@ def _make_chunked_loss_trainer(trainer_cls):
                 if (y != -100).sum() == 0:
                     continue  # all-prompt / all-padding slice
                 if torch.is_grad_enabled() and h.requires_grad:
-                    total = total + checkpoint(chunk_loss, h, y, use_reentrant=False)
+                    loss_sum, chunk_min = checkpoint(
+                        chunk_loss, h, y, use_reentrant=False
+                    )
                 else:
-                    total = total + chunk_loss(h, y)
+                    loss_sum, chunk_min = chunk_loss(h, y)
+                total = total + loss_sum
+                min_logprob = (
+                    chunk_min if min_logprob is None else torch.minimum(min_logprob, chunk_min)
+                )
+
+            n_tokens = (shift_labels != -100).sum().clamp(min=1)
+
+            if is_train and category:
+                # Batch size is 1 by default (see Cfg), so this is normally
+                # exact; a batch mixing categories (only possible if someone
+                # raises per_device_train_batch_size) is bucketed as "mixed"
+                # rather than mis-attributed to one row's category.
+                cat = category[0] if len(set(category)) == 1 else "mixed"
+                zero = total.new_zeros(())
+                self._cat_loss_sum[cat] = self._cat_loss_sum.get(cat, zero) + total.detach()
+                self._cat_tokens[cat] = self._cat_tokens.get(cat, zero) + n_tokens
+                if min_logprob is not None:
+                    prev = self._cat_min_logprob.get(cat)
+                    self._cat_min_logprob[cat] = (
+                        min_logprob.detach() if prev is None else torch.minimum(prev, min_logprob.detach())
+                    )
 
             # When Trainer passes num_items_in_batch it expects a sum-normalized
             # loss and skips its own gradient-accumulation division; when it
@@ -497,10 +561,55 @@ def _make_chunked_loss_trainer(trainer_cls):
             if num_items_in_batch is not None:
                 loss = total / num_items_in_batch
             else:
-                n_tokens = (shift_labels != -100).sum().clamp(min=1)
                 loss = total / n_tokens
 
             return (loss, {"loss": loss}) if return_outputs else loss
+
+        def log(self, *args, **kwargs):
+            super().log(*args, **kwargs)
+            logs = args[0] if args else kwargs.get("logs", {})
+            # Only a genuine train-progress log carries "loss" -- eval-summary
+            # logs (eval_loss, eval_runtime, ...) fire log() too, but flushing
+            # our accumulators on those would prematurely cut a window short
+            # for no reason (eval batches never feed the accumulators, since
+            # compute_loss only accumulates when is_train). Let them keep
+            # accruing across an eval interruption instead.
+            if "loss" not in logs or self.metrics_path is None or not hasattr(self, "_cat_loss_sum"):
+                return
+
+            now = time.time()
+            steps = max(1, self.state.global_step - self._last_log_step)
+            record = {
+                "step": self.state.global_step,
+                "epoch": logs.get("epoch"),
+                "lr": logs.get("learning_rate"),
+                "grad_norm": logs.get("grad_norm"),
+                "loss": logs.get("loss"),
+                # Average wall time per optimizer step since the last flush.
+                # Includes any eval that ran in this window, so a spike here
+                # can mean "an eval just ran," not slower training per se.
+                "elapsed": (now - self._last_log_time) / steps,
+            }
+            overall_loss_sum, overall_tokens = 0.0, 0
+            for cat, tot in self._cat_loss_sum.items():
+                tot_v, tok_v = tot.item(), self._cat_tokens[cat].item()
+                overall_loss_sum += tot_v
+                overall_tokens += tok_v
+                if tok_v:
+                    record[f"_loss_per_token/{cat}"] = tot_v / tok_v
+            if overall_tokens:
+                record["_loss_per_token"] = overall_loss_sum / overall_tokens
+            for cat, mlp in self._cat_min_logprob.items():
+                record[f"_min_logprob/{cat}"] = mlp.item()
+
+            with open(self.metrics_path, "a") as f:
+                f.write(json.dumps(record) + "\n")
+
+            self._cat_loss_sum.clear()
+            self._cat_tokens.clear()
+            self._cat_min_logprob.clear()
+            self._last_log_time = now
+            self._last_log_step = self.state.global_step
 
     return ChunkedLossTrainer
 
@@ -521,12 +630,58 @@ class PadCollator:
             batch["input_ids"].append(f["input_ids"] + [self.pad_token_id] * pad)
             batch["attention_mask"].append(f["attention_mask"] + [0] * pad)
             batch["labels"].append(f["labels"] + [-100] * pad)
-        return {k: torch.tensor(v, dtype=torch.long) for k, v in batch.items()}
+        out = {k: torch.tensor(v, dtype=torch.long) for k, v in batch.items()}
+        # Kept as a plain list of strings (never tensorized) so
+        # ChunkedLossTrainer.compute_loss can attribute loss/min-logprob to
+        # the right category for metrics.jsonl. remove_unused_columns=False
+        # is what keeps this column reaching the collator at all.
+        out["category"] = [f["category"] for f in features]
+        return out
 
 
 # --------------------------------------------------------------------------
 # Training entrypoint
 # --------------------------------------------------------------------------
+
+
+def silence_broken_torchao_dispatch() -> None:
+    """Work around a peft/torchao version mismatch seen on Kaggle's preinstalled
+    stack.
+
+    Some peft releases' LoRA layer dispatcher (`peft.tuners.lora.torchao
+    .dispatch_torchao`) calls `is_torchao_available()` as a plain feature
+    check, but that function *raises* ImportError (instead of returning
+    False) when it finds an installed-but-too-old torchao -- crashing
+    `get_peft_model()` outright. This script never uses torchao: LoRA here
+    targets plain `nn.Linear` layers (or bitsandbytes-quantized ones under
+    QLoRA), so the torchao dispatcher should just be skipped, not crash.
+    Forcing a `pip install -U torchao` instead is riskier than this -- torchao
+    wheels are ABI-coupled to the installed torch build, and Kaggle's
+    preinstalled torch may not match what a fresh torchao expects. Same
+    "route around environment churn without crashing" policy as
+    `build_training_arguments()`'s kwarg-dropping and the `dtype`/
+    `torch_dtype` fallback above.
+    """
+    try:
+        import peft.tuners.lora.torchao as _torchao_dispatch
+    except ImportError:
+        return
+    try:
+        # The call itself is what raises when the installed torchao is too
+        # old -- so the probe has to be inside the try, not a precondition
+        # for entering it.
+        if _torchao_dispatch.is_torchao_available():
+            return  # a working, compatible torchao is present; nothing to do
+    except ImportError:
+        pass
+    else:
+        return  # cleanly returned False (torchao just isn't installed)
+    print(
+        "WARNING: peft's torchao availability check is broken for the "
+        "installed torchao version (raises instead of returning False); "
+        "patching it out since this script doesn't use torchao."
+    )
+    _torchao_dispatch.is_torchao_available = lambda: False
 
 
 def find_latest_checkpoint(output_dir: str) -> str | None:
@@ -643,6 +798,17 @@ def preview(tokenizer, example: dict) -> None:
 
 
 def main(dry_run: bool = False, limit: int | None = None) -> None:
+    # Kaggle's "GPU T4 x2" accelerator exposes two devices. This script trains
+    # single-process (no accelerate/torchrun launch, no DDP), so it only ever
+    # wants one of them. device_map={"": 0} (see below) is not reliably
+    # enough on its own -- observed in practice landing the model on cuda:1
+    # anyway, likely accelerate's single-device shortcut or bitsandbytes'
+    # quantization init falling back to torch.cuda.current_device() rather
+    # than honoring the requested target. Restricting device visibility via
+    # CUDA_VISIBLE_DEVICES is the reliable version of the same intent, and
+    # has to happen before torch is imported by anything (transformers pulls
+    # torch in as soon as it's imported), hence first line of main().
+    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
     from transformers import AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(CFG.model_name)
@@ -669,6 +835,16 @@ def main(dry_run: bool = False, limit: int | None = None) -> None:
 
     compute_dtype = torch.bfloat16 if bf16 else torch.float16 if fp16 else torch.float32
 
+    # Kaggle's "GPU T4 x2" accelerator exposes two devices. This script trains
+    # single-process (no accelerate/torchrun launch, no DDP), so device_map=
+    # "auto" with two GPUs visible makes accelerate shard the model across
+    # both -- naive pipeline parallelism, not data parallelism -- which
+    # serializes every forward/backward across a slow inter-GPU link with one
+    # GPU idle at a time. A 0.6B model fits on a single T4 with room to
+    # spare, so pin to one device instead; this alone can be a 10x+ slowdown
+    # if left on "auto" with 2 GPUs.
+    device_map = {"": 0} if cuda else None
+
     use_4bit = CFG.load_in_4bit and cuda
     if CFG.load_in_4bit and not cuda:
         print(
@@ -691,7 +867,7 @@ def main(dry_run: bool = False, limit: int | None = None) -> None:
             bnb_4bit_compute_dtype=compute_dtype,
         )
         model = AutoModelForCausalLM.from_pretrained(
-            CFG.model_name, quantization_config=quant_config, device_map="auto"
+            CFG.model_name, quantization_config=quant_config, device_map=device_map
         )
         model.config.use_cache = False
         # Casts non-quantized modules (layernorms etc.) to fp32 and enables
@@ -703,15 +879,17 @@ def main(dry_run: bool = False, limit: int | None = None) -> None:
     else:
         try:
             model = AutoModelForCausalLM.from_pretrained(
-                CFG.model_name, dtype=compute_dtype, device_map="auto"
+                CFG.model_name, dtype=compute_dtype, device_map=device_map
             )
         except TypeError:  # transformers < 4.56 spells it torch_dtype
             model = AutoModelForCausalLM.from_pretrained(
-                CFG.model_name, torch_dtype=compute_dtype, device_map="auto"
+                CFG.model_name, torch_dtype=compute_dtype, device_map=device_map
             )
         model.config.use_cache = False
         if CFG.gradient_checkpointing:
             model.enable_input_require_grads()  # needed for LoRA + checkpointing
+
+    silence_broken_torchao_dispatch()
 
     peft_config = LoraConfig(
         r=CFG.lora_rank,
@@ -748,6 +926,9 @@ def main(dry_run: bool = False, limit: int | None = None) -> None:
         eval_dataset=Dataset.from_list(val_rows) if val_rows else None,
         data_collator=PadCollator(tokenizer.pad_token_id),
     )
+    Path(CFG.output_dir).mkdir(parents=True, exist_ok=True)
+    trainer.metrics_path = Path(CFG.output_dir) / CFG.metrics_file
+    print(f"per-category training metrics: {trainer.metrics_path}")
 
     resume_from = find_latest_checkpoint(CFG.output_dir)
     if resume_from:
