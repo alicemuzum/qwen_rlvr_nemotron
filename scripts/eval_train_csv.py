@@ -14,6 +14,7 @@ Usage: uv run python scripts/eval_train_csv.py
 from __future__ import annotations
 
 import csv
+import math
 import re
 import sys
 from pathlib import Path
@@ -57,6 +58,37 @@ def last_boxed(trace: str | None) -> str | None:
     if idx == -1:
         return None
     return body[idx + len(_BOXED_MARKER) :]
+
+
+_BINARY_RE = re.compile(r"[01]+")
+
+
+def compare_answer(ground_truth: str, predicted: str) -> bool:
+    """Grade a prediction the way the competition's official metric does.
+
+    Per the competition's own "Evaluation" page: "A prediction is graded as
+    correct if it matches the ground truth either exactly as a string or
+    within a relative numerical tolerance of 10^-2." This mirrors that rule
+    (and this repo's original author's own ``reasoning.py::compare_answer``,
+    verified against the same wording) rather than the plain exact-string
+    check this script used before: gravity/unit_conversion's generators now
+    deliberately emit their own computed estimate rather than echoing
+    ``problem.answer`` verbatim (see CLAUDE.md), so an exact-string-only
+    check would undercount rows that the real metric accepts. Binary
+    strings are special-cased to exact match first, since e.g. "10001001"
+    parsed as a float can spuriously fall within 1% of an unrelated bit
+    string that happens to be numerically close.
+    """
+    if ground_truth == predicted:
+        return True
+    if _BINARY_RE.fullmatch(ground_truth):
+        return False
+    try:
+        return math.isclose(
+            float(ground_truth), float(predicted), rel_tol=1e-2, abs_tol=1e-5
+        )
+    except (TypeError, ValueError):
+        return False
 
 
 # ---- Per-category prompt parsers: prompt text -> (examples, question) ----
@@ -193,7 +225,9 @@ def main() -> None:
             if trace is not None:
                 stats[cat]["solved"] += 1
 
-            correct = reasoning_answer is not None and reasoning_answer == answer
+            correct = reasoning_answer is not None and compare_answer(
+                answer, reasoning_answer
+            )
             if correct:
                 stats[cat]["correct"] += 1
 

@@ -46,17 +46,28 @@ Instead:
     conclusion tag is terminally penalized. Only the *last* conclusion tag
     counts.
 
-The conclusion's boxed answer is graded with a ``1e-2`` numeric tolerance
-rather than exact string equality, mirroring reward_unit_conversion.py: k_fit
-is a median-of-truncated-divisions estimate, not an exact recovery, so the
-final d = k_fit*t^2 can land close to but not byte-identical with the stored
+The conclusion's boxed answer is graded with the competition's own tolerance
+rule -- ``math.isclose(rel_tol=1e-2, abs_tol=1e-5)``, i.e. a *relative*
+1e-2 tolerance, not a fixed absolute one -- rather than exact string
+equality, mirroring reward_unit_conversion.py: k_fit is a
+median-of-truncated-divisions estimate, not an exact recovery, so the final
+d = k_fit*t^2 can land close to but not byte-identical with the stored
 answer even on a fully correct-method trace. Exact-match grading would
 inject that same rounding-luck noise into the GRPO advantage estimate that
-this module's k_fit-grading discipline above already avoids.
+this module's k_fit-grading discipline above already avoids. A fixed
+*absolute* 0.01 tolerance was tried first and is wrong at gravity's scale:
+``reasoning_gravity`` itself now gates on the same relative rule (see its
+module docstring and CLAUDE.md's "gravity/unit_conversion tolerance-gate
+fix"), so its own gold traces can legitimately land up to ~1% off in
+absolute terms for larger d -- measured directly, up to 0.28 absolute on an
+answer of 1144.60, which a fixed-0.01-tolerance check would have wrongly
+scored ``R_terminal_fail`` on 114/1500 (7.6%) sampled gold traces before this
+was caught and fixed.
 """
 
 from __future__ import annotations
 
+import math
 import re
 from decimal import InvalidOperation
 from typing import Any
@@ -81,7 +92,8 @@ _CEILINGS: dict[str, float] = {
 
 _MAX_STEPS = 500
 
-_TOLERANCE = 1e-2 + 1e-9
+_REL_TOLERANCE = 1e-2
+_ABS_TOLERANCE = 1e-5
 
 _MARKER_RE = re.compile(r"^t = (\S+)s, d = (\S+)m:$")
 _KVALUES_RE = re.compile(r"^k values: (.+)$")
@@ -468,7 +480,12 @@ def evaluate_structured_trace(
                 final_val = float(final_str) if final_str is not None else None
             except ValueError:
                 final_val = None
-            if final_val is not None and abs(final_val - float(expected_answer)) <= _TOLERANCE:
+            if final_val is not None and math.isclose(
+                final_val,
+                float(expected_answer),
+                rel_tol=_REL_TOLERANCE,
+                abs_tol=_ABS_TOLERANCE,
+            ):
                 total_reward += 10.0
                 reason = "R_terminal_win (boxed answer within tolerance)"
             else:

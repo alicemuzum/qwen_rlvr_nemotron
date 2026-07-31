@@ -36,19 +36,28 @@ trace based on rounding luck. Instead:
     conclusion tag is terminally penalized. Only the *last* conclusion tag
     counts.
 
-**The one deliberate divergence from reward_gravity.py:** the conclusion's
-boxed answer is graded with a ``1e-2`` numeric tolerance instead of exact
-string equality. Unlike gravity's k, the factor here is confirmed (measured
-against 300 real train.csv rows) to only exactly reproduce the stored
-answer ~82.7% of the time even with fully correct-method estimation; the
-remaining ~17% land within 0.01-0.02 due to rounding noise in 2dp-rounded
-example inputs/outputs. Exact-match grading here would inject that same
-rounding-luck noise into the advantage estimate that this codebase's design
-philosophy (see gravity/cryptarithm docstrings) explicitly avoids.
+**The one deliberate divergence from reward_gravity.py used to be the
+tolerance value; now the mechanism is identical.** The conclusion's boxed
+answer is graded with the competition's own tolerance rule --
+``math.isclose(rel_tol=1e-2, abs_tol=1e-5)``, a *relative* 1e-2 tolerance --
+instead of exact string equality or a fixed absolute delta. Unlike gravity's
+k, the factor here is confirmed (measured against 300 real train.csv rows)
+to only exactly reproduce the stored answer ~82.7% of the time even with
+fully correct-method estimation; the remaining ~17% land close but not
+byte-identical due to rounding noise in 2dp-rounded example inputs/outputs.
+Exact-match grading here would inject that same rounding-luck noise into the
+advantage estimate that this codebase's design philosophy (see gravity/
+cryptarithm docstrings) explicitly avoids. A fixed *absolute* 0.01 tolerance
+was tried first and is wrong once the input magnitude grows past ~1: the
+same relative-vs-absolute mismatch documented in reward_gravity.py's
+docstring applies here too, since ``reasoning_unit_conversion`` now gates on
+the same relative rule (see its module docstring and CLAUDE.md's
+"gravity/unit_conversion tolerance-gate fix").
 """
 
 from __future__ import annotations
 
+import math
 import re
 from decimal import InvalidOperation
 from typing import Any
@@ -84,7 +93,8 @@ _VERIFY_RE = re.compile(
     r"^out\((\S+)\) = (\S+)\*(\S+) = (\S+) vs (\S+): (match|mismatch)$"
 )
 
-_TOLERANCE = 1e-2 + 1e-9
+_REL_TOLERANCE = 1e-2
+_ABS_TOLERANCE = 1e-5
 
 
 def _safe_2dp(s: str) -> str | None:
@@ -415,7 +425,12 @@ def evaluate_structured_trace(
                 final_val = float(final_str) if final_str is not None else None
             except ValueError:
                 final_val = None
-            if final_val is not None and abs(final_val - float(expected_answer)) <= _TOLERANCE:
+            if final_val is not None and math.isclose(
+                final_val,
+                float(expected_answer),
+                rel_tol=_REL_TOLERANCE,
+                abs_tol=_ABS_TOLERANCE,
+            ):
                 total_reward += 10.0
                 reason = "R_terminal_win (boxed answer within tolerance)"
             else:

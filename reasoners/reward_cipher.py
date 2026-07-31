@@ -25,6 +25,37 @@ Design principles (see reasoners/reward_cryptarithm.py for the sibling task):
     still a mistake.
   * A trace that never reaches a conclusion tag is terminally penalized, so
     "rack up partial credit and never commit" is not a viable strategy.
+
+Two bugfixes applied to the "verification" tag handling (found while wiring
+cipher into `kaggle/train_grpo_tinker.py`'s `_check_reward_discrimination`,
+which this function had never been exercised against before; both are also
+applied identically in `reasoners/reward_cipher_partial.py`, the
+partial-oracle variant used for GRPO -- see that file's module docstring for
+the full writeup and measurements):
+
+  1. The dashed-reconstruction branch (`elif "->" in content and "–" in
+     content`) now only fires when the immediately preceding step is itself
+     a "Best match:" verification -- matching how `reasoners/cipher.py`
+     actually emits those two lines back-to-back. Without this guard, an
+     unrelated already-known question word's own verification line (same
+     "->"+"–" shape, no dictionary lookup involved) could be compared
+     against a stale `last_best_match_word` left over from an earlier
+     word. Provably inert on `cipher.py`'s own gold traces (loop 1 always
+     emits every known-word line before loop 2 ever sets
+     `last_best_match_word`), kept as defense-in-depth since it can only
+     ever suppress a spurious delta, never add one.
+  2. The "Best match:" / generic-derivation checks now grade the resolved
+     word against that word's own absolute position in the question
+     (tracked via `unknown_position_queue`), not `verified_word_count`
+     (count of dictionary lookups that have succeeded SO FAR). Those two
+     numbers coincide only when every earlier question word also needed a
+     dictionary lookup; the moment an earlier word was already decodable
+     straight from the visible examples (common, and never itself
+     increments `verified_word_count`), every later lookup was graded
+     against the wrong expected word. This was the actual, measured cause
+     of a gold trace scoring higher after every verification step was
+     deleted than intact (40/80 sampled traces) -- a foolproof-contract
+     gold trace must never score worse for including more honest steps.
 """
 
 from __future__ import annotations
@@ -90,6 +121,13 @@ def evaluate_structured_trace(
     last_best_match_word: str | None = None
     saw_conclusion = False
     step_logs: list[dict[str, Any]] = []
+
+    # Bugfix 2 (see module docstring): tracks each question word's ABSOLUTE
+    # position, separate from verified_word_count (which only counts
+    # confirmed-correct dictionary lookups, and drifts the moment any earlier
+    # word in the question didn't need one).
+    word_position = 0
+    unknown_position_queue: list[int] = []
 
     steps = re.findall(r'<step type="(.*?)">(.*?)</step>', response_xml, re.DOTALL)
 
@@ -259,12 +297,18 @@ def evaluate_structured_trace(
                 if m:
                     word = m.group(1).strip()
                     last_best_match_word = word
-                    if (
-                        verified_word_count < len(expected_words)
-                        and word == expected_words[verified_word_count]
-                    ):
+                    # Grade against this word's own absolute question
+                    # position (popped from unknown_position_queue below),
+                    # not verified_word_count -- see the module docstring's
+                    # bugfix 2. Falls back to verified_word_count if the
+                    # queue is empty (a malformed/adversarial trace that
+                    # never emitted the expected per-word verification
+                    # lines), matching the original's only-available index
+                    # for that case rather than crashing or skipping.
+                    idx = unknown_position_queue.pop(0) if unknown_position_queue else verified_word_count
+                    if idx < len(expected_words) and word == expected_words[idx]:
                         total_reward += 1.0
-                        verified_word_count += 1
+                        verified_word_count = min(verified_word_count + 1, len(expected_words))
                         reason = "Correctly identified the word via dictionary"
                     else:
                         total_reward -= 1.5
@@ -289,26 +333,48 @@ def evaluate_structured_trace(
             elif "->" in content and "–" in content:
                 # Dashed reconstruction line following a "Best match" claim, e.g.
                 # 【c-o-l-o-r-(w)-u-l】->【c-o-l-o-r-f-u-l】. Groundable only as a
-                # self-consistency check against the word just claimed above.
-                tail = content.rsplit("->", 1)[1]
-                reconstructed = tail.replace("【", "").replace("】", "").replace("–", "").strip()
-                if last_best_match_word is not None and reconstructed == last_best_match_word:
-                    total_reward += 0.1
-                    reason = "Reconstruction consistent with claimed best match"
-                elif last_best_match_word is not None:
-                    total_reward -= 0.5
-                    reason = "Reconstruction contradicts its own claimed best match"
+                # self-consistency check against the word just claimed above --
+                # and only when THIS line is the one that actually follows that
+                # claim (bugfix 1: see module docstring).
+                prev_is_best_match = (
+                    i > 0
+                    and steps[i - 1][0] == "verification"
+                    and steps[i - 1][1].strip().startswith("Best match:")
+                )
+                if prev_is_best_match:
+                    tail = content.rsplit("->", 1)[1]
+                    reconstructed = tail.replace("【", "").replace("】", "").replace("–", "").strip()
+                    if last_best_match_word is not None and reconstructed == last_best_match_word:
+                        total_reward += 0.1
+                        reason = "Reconstruction consistent with claimed best match"
+                    elif last_best_match_word is not None:
+                        total_reward -= 0.5
+                        reason = "Reconstruction contradicts its own claimed best match"
+                else:
+                    # Not adjacent to a Best-match claim: the ordinary
+                    # one-per-question-word verification line cipher.py
+                    # emits for every word -- bookkeeping only (bugfix 2:
+                    # see module docstring), no reward delta. Records this
+                    # word's absolute position, and queues it if still
+                    # unresolved (a "(" placeholder marker), so a LATER
+                    # "Best match:"/derivation line is graded against the
+                    # right expected-word index.
+                    pos = word_position
+                    word_position += 1
+                    if "(" in content:
+                        unknown_position_queue.append(pos)
 
             elif "->" in content:
                 parts = content.split("->")
                 if len(parts) >= 2:
                     derived_word = parts[-1].strip()
                     if "(" not in derived_word:
-                        if verified_word_count < len(expected_words):
-                            if derived_word == expected_words[verified_word_count]:
+                        idx = unknown_position_queue.pop(0) if unknown_position_queue else verified_word_count
+                        if idx < len(expected_words):
+                            if derived_word == expected_words[idx]:
                                 total_reward += 1.0
                                 reason = "Subgoal achieved (derived expected word)"
-                                verified_word_count += 1
+                                verified_word_count = min(verified_word_count + 1, len(expected_words))
                             else:
                                 total_reward -= 1.0
                                 reason = "Incorrect full derivation"

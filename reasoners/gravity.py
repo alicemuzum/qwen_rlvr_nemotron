@@ -7,12 +7,24 @@ it the same way. The long multiplication/division breakdowns stay untagged
 scratch work (mirroring cipher.py's untagged "Breaking down into
 characters" preamble); only the compact checkpoint claims are tagged.
 
-Follows the foolproof contract: the boxed answer is checked against
-``problem.answer`` before returning, so a caller never receives an
-unverified trace.
+Follows the foolproof contract, calibrated to the competition's actual
+grading rule rather than exact string equality: the official evaluation
+metric (see the competition's "Evaluation" page) accepts a prediction "that
+matches the ground truth either exactly as a string or within a relative
+numerical tolerance of 10^-2", and this repo's original author (huikang,
+see CLAUDE.md) grades this exact generator's output the same way in his
+published solution. The boxed answer -- our own computed estimate, not a
+copy of ``problem.answer`` -- is checked against ``problem.answer`` with
+that same ``rel_tol=1e-2`` tolerance before returning, so a caller never
+receives a trace whose claimed answer would actually fail the competition's
+metric, while still accepting the k-estimation noise the metric itself
+tolerates (see CLAUDE.md's gravity solve-rate note for the empirical
+before/after: 60.4% -> 100% on real train.csv rows).
 """
 
 from __future__ import annotations
+
+import math
 
 from reasoners.store_types import (
     Problem,
@@ -130,12 +142,14 @@ def reasoning_gravity(problem: Problem) -> str | None:
         f'<step type="execution">d = {k_fit_str}*{t_sq_str} = {boxed_answer}</step>'
     )
 
-    if boxed_answer != round_2dp(problem.answer):
+    if not math.isclose(
+        float(boxed_answer), float(problem.answer), rel_tol=1e-2, abs_tol=1e-5
+    ):
         return None
 
     lines.append("")
     lines.append(
         '<step type="conclusion">I will now return the answer in \\boxed{}\n'
-        f"The answer in \\boxed{{–}} is \\boxed{{{problem.answer}}}</step>"
+        f"The answer in \\boxed{{–}} is \\boxed{{{boxed_answer}}}</step>"
     )
     return wrap_trace_with_think("\n".join(lines))

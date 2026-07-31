@@ -8,12 +8,19 @@ structurally a near-clone of ``gravity.py`` with the ``t^2`` squaring step
 removed: the per-example constant here is derived directly from the input
 (``factor = output / input``) rather than from its square.
 
-Follows the foolproof contract: the boxed answer is checked against
-``problem.answer`` before returning, so a caller never receives an
-unverified trace.
+Follows the foolproof contract, calibrated to the competition's actual
+grading rule rather than exact string equality (same reasoning as
+``gravity.py``, see its module docstring): the boxed answer -- our own
+computed estimate, not a copy of ``problem.answer`` -- is checked against
+``problem.answer`` with the official metric's ``rel_tol=1e-2`` tolerance
+before returning, so a caller never receives a trace whose claimed answer
+would actually fail the competition's metric (empirically: 82.9% -> 100% on
+real train.csv rows, see CLAUDE.md).
 """
 
 from __future__ import annotations
+
+import math
 
 from reasoners.store_types import (
     Problem,
@@ -128,12 +135,14 @@ def reasoning_unit_conversion(problem: Problem) -> str | None:
         f'<step type="execution">answer = {med_factor_str}*{q_str} = {boxed_answer}</step>'
     )
 
-    if boxed_answer != round_2dp(problem.answer):
+    if not math.isclose(
+        float(boxed_answer), float(problem.answer), rel_tol=1e-2, abs_tol=1e-5
+    ):
         return None
 
     lines.append("")
     lines.append(
         '<step type="conclusion">I will now return the answer in \\boxed{}\n'
-        f"The answer in \\boxed{{–}} is \\boxed{{{problem.answer}}}</step>"
+        f"The answer in \\boxed{{–}} is \\boxed{{{boxed_answer}}}</step>"
     )
     return wrap_trace_with_think("\n".join(lines))

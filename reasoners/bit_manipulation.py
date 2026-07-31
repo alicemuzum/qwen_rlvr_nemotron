@@ -1070,6 +1070,16 @@ def reasoning_bit_manipulation(problem: Problem) -> Optional[str]:
     if all(r.is_default for r in best):
         return None
 
+    # Foolproof contract: verify the derived rule vector actually reproduces
+    # problem.answer before emitting a trace that claims it. `_evaluate_rule`
+    # is the same per-bit evaluator `_emit_apply` uses below (directly for
+    # the pair families, and via hand-copied identical logic for I/NOT/
+    # Constant/DEFAULT), so this is bit-identical to what the emitted
+    # conclusion's \boxed{} will contain.
+    answer_bits = "".join(_evaluate_rule(question_bits, rule) for rule in best)
+    if answer_bits != problem.answer:
+        return None
+
     lines.append('<step type="state_update">')
     lines.append("Selected")
     for i, rule in enumerate(best):

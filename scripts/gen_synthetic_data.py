@@ -15,16 +15,15 @@ Design decisions (all from CLAUDE.md / the advisor review):
   function), so it's assembled here from the same pieces the monitor uses.
 
 * Per-category verification is intentionally *not* uniform:
-    - The 5 foolproof generators (cryptarithm, gravity, numeral,
-      unit_conversion, equation_numeric) already guarantee ``boxed == answer``
-      whenever they return non-None, so a non-None trace is accepted as-is.
-      We never re-parse their boxed answer -- that sidesteps cryptarithm's
-      literal ``{``/``}`` symbols and unit_conversion's trailing-zero format
-      differences.
-    - cipher and bit_manipulation have no foolproof contract, so their traces
-      are accepted only if the last ``\\boxed{...}`` equals ``problem.answer``.
-      Both answer types are brace-free (plaintext words / pure binary), so a
-      naive boxed regex is safe *for these two only*.
+    - The 6 foolproof generators (cryptarithm, gravity, numeral,
+      unit_conversion, equation_numeric, bit_manipulation) already guarantee
+      ``boxed == answer`` whenever they return non-None, so a non-None trace
+      is accepted as-is. We never re-parse their boxed answer -- that
+      sidesteps cryptarithm's literal ``{``/``}`` symbols and
+      unit_conversion's trailing-zero format differences.
+    - cipher has no foolproof contract, so its traces are accepted only if
+      the last ``\\boxed{...}`` equals ``problem.answer``. Its answers are
+      brace-free (plaintext words), so a naive boxed regex is safe here.
 
 * Prompts match the real ``train.csv`` phrasing (the actual task-time
   distribution). NOTE: the kaggle GRPO stage uses a different prompt shape
@@ -83,9 +82,10 @@ CATEGORIES = [
 ]
 
 # Categories whose generator honours the foolproof contract (non-None => the
-# emitted boxed answer already equals problem.answer). The other two (cipher,
-# bit_manipulation) need an explicit boxed==answer check.
+# emitted boxed answer already equals problem.answer). cipher is the only one
+# that needs an explicit boxed==answer check.
 _FOOLPROOF = {
+    "bit_manipulation",
     "cryptarithm",
     "equation_numeric",
     "gravity",
@@ -249,7 +249,7 @@ def _verify(category: str, p: Problem, trace: str | None) -> bool:
         return False
     if category in _FOOLPROOF:
         return True
-    # cipher / bit_manipulation: no foolproof contract -> check boxed==answer.
+    # cipher: no foolproof contract -> check boxed==answer.
     matches = _BOXED_RE.findall(trace)
     return bool(matches) and matches[-1] == p.answer
 

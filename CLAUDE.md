@@ -54,10 +54,15 @@ uv run python -m reasoners.monitor_gravity       # generate+score one random gra
 uv run python -m reasoners.monitor_numeral       # generate+score one random numeral trace, same style
 uv run python -m reasoners.monitor_unit_conversion # generate+score one random unit_conversion trace, same style
 uv run python -m reasoners.monitor_equation_numeric # generate+score one random equation_numeric trace, same style
-uv run python -m reasoners.monitor_bit_manipulation # generate+score one random bit_manipulation trace, same style (WIP -- see "Current gaps")
+uv run python -m reasoners.monitor_bit_manipulation # generate+score one random bit_manipulation trace, same style
 uv run python reasoners/run_cipher.py            # minimal example: build a Problem, call reasoning_cipher, print the trace
 uv run python scripts/eval_train_csv.py          # run every reasoner against all 9500 real train.csv rows, write reasoners_train_csv_eval.csv + print per-category accuracy
 uv run python scripts/gen_synthetic_data.py      # bulk synthetic SFT-trace generator across all 7 categories, writes reasoners_synthetic_sft.jsonl (see "Bulk synthetic SFT data generation" below)
+uv run python scripts/validate_reward_cipher_partial.py # validates reward_cipher_partial.py (gold-trace scoring, full-oracle parity with reward_cipher.py, adversarial checks)
+uv run python scripts/score_policy_completions.py # $0: score the SFT policy's real completions through ReasonerEnv's reward path (does the reward separate right from wrong on actual model output?)
+uv run python scripts/eval_sft_tinker_train_csv.py --run-dir <run> --yes # PAID: sample a SFT/GRPO checkpoint on real train.csv rows (250/category, temp 0); --categories to subset, --limit 7 for a ~$0.05 smoke, no --yes = free preview
+uv run python scripts/analyze_grpo_rollouts.py grpo_tinker_runs/<run> 10 # $0: pool a GRPO run's per-rollout summaries early-vs-late, bootstrapped over groups (never read a single step)
+uv run python scripts/compare_before_after_eval.py BEFORE.csv AFTER.csv  # $0: paired before/after on identical prompts -- McNemar exact + bootstrap CI
 uv run ruff check .                              # lint (ruff is a dev dependency; no repo-specific ruff config file)
 ```
 
@@ -158,26 +163,32 @@ a missing one.
   directly: a symbol answer of `"]d}"` round-trips through the wrapper to a
   correct trailing `\boxed{]d}}` line).
 
-  **`bit_manipulation.py` is the one exception to the foolproof contract
-  above, and its tag conversion is still in-progress (uncommitted in git as
-  of this writing).** Unlike every other tagged generator,
-  `reasoning_bit_manipulation` does not gate its emitted trace on
-  `answer == problem.answer` before returning -- it was wrapped in
-  `<step>` tags without adding that check, so it can still confidently
-  emit a wrong boxed answer (see the solve-rate table and "Current gaps"
-  below). `reward_bit_manipulation.py` and `monitor_bit_manipulation.py`
-  both exist and work (same `evaluate_structured_trace(response_xml,
-  examples, expected_answer)` 3-arg shape as `reward_numeral.py`/
-  `reward_gravity.py` -- no oracle param, for the same ambiguity reason as
-  cryptarithm/equation_numeric, see "Why the reward functions are shaped
-  differently"), and `monitor_bit_manipulation.py` routes around the
-  missing foolproof check with its own retry loop (construct, run the
-  generator, discard/retry until the emitted boxed answer matches the
-  known synthetic answer) -- the same pattern cryptarithm/gravity use to
-  absorb their own generators' ambiguity misses, just needed here for a
-  different reason (a missing check, not inherent ambiguity). Fixing
-  `reasoning_bit_manipulation` itself to add the missing gate is still
-  open work.
+  **`bit_manipulation.py` now follows the foolproof contract too (gate
+  added this session).** `reasoning_bit_manipulation` re-derives a per-bit
+  rule vector from only the visible examples (bitsum-hash column matching +
+  left/right stride-run extrapolation -- the same algorithm independently
+  described in the Kaggle discussion post "How I solved bit manipulation
+  problems" by huikang, this repo's original author, whose own reported
+  85.1%/1364-of-1602 figure is what this file's solve-rate table below
+  already measured), evaluates that vector against `question_bits` via
+  `_evaluate_rule`, and now `return None`s unless the result equals
+  `problem.answer` -- the same `answer == problem.answer` gate every other
+  tagged generator already had. `reward_bit_manipulation.py` and
+  `monitor_bit_manipulation.py` both exist and work (same
+  `evaluate_structured_trace(response_xml, examples, expected_answer)`
+  3-arg shape as `reward_numeral.py`/`reward_gravity.py` -- no oracle param,
+  for the same ambiguity reason as cryptarithm/equation_numeric, see "Why
+  the reward functions are shaped differently"); `monitor_bit_manipulation.py`
+  still retries (construct, run the generator, discard on `None`) but no
+  longer needs its own separate boxed-answer re-check now that the
+  generator gates internally -- same pattern as
+  `monitor_equation_numeric.py`. Solve rate is unchanged at 85.1%
+  (`_evaluate_rule` can still land on a different, still
+  example-consistent rule than the synthetic ground truth, the same
+  ambiguity risk cryptarithm/equation_numeric document), but `solved` and
+  `correct` are now the same number -- re-measured on the full `train.csv`:
+  1364/1364, zero wrong-answer traces (see the solve-rate table below,
+  which no longer needs its "no foolproof contract" caveat).
 
 ### How training data is actually generated (don't use train.csv as an oracle source)
 
@@ -233,19 +244,19 @@ below held within a point or two of the sampled figures:
 |---|---|---|
 | cipher | ~100% (300/300 sampled; 1576/1576 full dataset) | dictionary-fallback logic handles letters absent from the visible examples. No foolproof check against `problem.answer` (see "Two kinds of reasoner module"), but 0 wrong answers observed on the full dataset |
 | cryptarithm | ~8.5% (823-row full dataset: 70/823 = 8.5%, 0 wrong) | documented above; example equations rarely pin a unique symbol->digit assignment |
-| gravity | ~62% (300/300 sampled, post rounding-fix; was 0/300 before -- see below); 964/1597 = 60.4% on the full dataset, 0 wrong | remaining misses are genuine estimation noise from the median-of-truncated-divisions approach on 2dp-rounded inputs, not a bug |
-| unit_conversion | ~81% (243/300 sampled); 1322/1594 = 82.9% on the full dataset | median-of-truncated-divisions estimation noise, same as gravity -- but unlike gravity, the per-example division needs 6dp precision (not the 3dp default) to avoid a *systematic* bias; see the note below the table. **Zero wrong-answer traces** among the solved rows -- the foolproof contract holds |
+| gravity | **100.0% (1597/1597) on the full dataset**, post tolerance-gate fix (was 60.4%, 964/1597, before -- see "The gravity/unit_conversion tolerance-gate fix" below) | the median-of-truncated-divisions `k` estimate carries real rounding noise and rarely lands byte-exact, but the competition's own official metric accepts a 1e-2 relative tolerance -- once the generator's gate was calibrated to that (instead of exact string match), essentially every row clears it |
+| unit_conversion | **100.0% (1594/1594) on the full dataset**, post tolerance-gate fix (was 82.9%, 1322/1594, before) | same fix as gravity, same tolerance -- see "The gravity/unit_conversion tolerance-gate fix" below |
 | equation_numeric | ~77% (230/300 sampled); 559/732 = 76.4% on the full dataset | post foolproof-fix + tag conversion; the rest return `None` (a few examples don't always pin a unique operation -- same ambiguity risk as cryptarithm), **zero wrong-answer traces** among the solved rows. Was previously N/A: pre-fix the generator confidently emitted 69/300 wrong answers (see "Current gaps") |
 | numeral | 1576/1576 = 100% on the full dataset, 0 wrong | not previously sampled at 300; deterministically recomputed from a fixed universal Roman-numeral table (see "Why the reward functions are shaped differently"), so it isn't ambiguity- or estimation-limited the way cryptarithm/gravity are |
-| bit_manipulation | 1602/1602 "solved" (a trace is emitted almost always) but only **1364/1602 = 85.1% correct** (238 confidently wrong boxed answers) | **the one category with no foolproof contract** -- `reasoning_bit_manipulation` never checks its derived rule against `problem.answer` before returning, so unlike every other category, "solved" and "correct" are different numbers here. This is the only generator that emits genuinely wrong training traces today. It does now have a tagged trace format, `reward_bit_manipulation.py`, and `monitor_bit_manipulation.py` (uncommitted, see "Two kinds of reasoner module"); see "Current gaps" |
+| bit_manipulation | 1364/1364 = 100% of emitted traces correct (85.1% of the full dataset gets a trace at all: 1364/1602) | foolproof gate added this session (see "Two kinds of reasoner module") -- `reasoning_bit_manipulation` now re-checks its derived rule against `problem.answer` and returns `None` on the 238 rows it used to get wrong, instead of emitting a confidently-wrong trace. `solved == correct` now holds, same as every other category. Has a tagged trace format, `reward_bit_manipulation.py`, and `monitor_bit_manipulation.py` |
 
-For the five foolproof generators (cryptarithm, gravity, numeral,
-unit_conversion, equation_numeric), `scripts/eval_train_csv.py` confirmed
-`solved == correct` exactly on the full dataset -- i.e. zero wrong answers
-among emitted traces, as the foolproof contract promises. `cipher` has no
-such internal check but also measured 0 wrong on the full dataset.
-`bit_manipulation` is the only exception, and its 238 wrong-answer rows are
-all cases where the generator emitted a full trace (not a decline).
+For all six foolproof generators (cryptarithm, gravity, numeral,
+unit_conversion, equation_numeric, bit_manipulation), `scripts/eval_train_csv.py`
+confirmed `solved == correct` exactly on the full dataset -- i.e. zero wrong
+answers among emitted traces, as the foolproof contract promises. `cipher`
+has no such internal check but also measured 0 wrong on the full dataset.
+Re-run after the bit_manipulation fix: bit_manipulation 1364/1364, 0 wrong
+(previously 238/1602 wrong before the gate was added).
 
 **Gotcha for anyone extracting `\boxed{...}` content programmatically:**
 a naive brace-balancing regex like `\boxed\{([^{}]*)\}` will mis-parse
@@ -276,17 +287,25 @@ per-example division (both in `reasoning_unit_conversion` and
 must stay bit-identical**, same discipline as everywhere else in this
 codebase) removed the bias and brought the real-row solve rate to ~81%
 (243/300), matching gravity's ballpark. The remaining ~19% misses at 6dp
-are genuine median-of-truncated-divisions estimation noise (rounding in
-the 2dp example values themselves), the same kind gravity's docstring
-describes -- not a further precision issue: precision beyond 6dp measured
-no further improvement (81% flat through 10dp).
+were, at the time, genuine median-of-truncated-divisions estimation noise
+under an exact-match gate (rounding in the 2dp example values themselves) --
+not a further precision issue, since precision beyond 6dp measured no
+further improvement (81% flat through 10dp). **That gate was later loosened
+to the competition's actual 1e-2 relative tolerance** (see "The gravity/
+unit_conversion tolerance-gate fix" above), which absorbed essentially all
+of that remaining noise and brought both categories to 100% -- the 6dp fix
+documented here is still necessary (it's what keeps the estimate biased
+close enough to fall inside that tolerance at all), just no longer the
+whole story.
 
-Given this spread, **the right SFT data source is a per-category decision,
-not a blanket policy**: cipher can lean on real rows directly; cryptarithm
-and gravity need synthetic-primary generation (real rows are too sparse or,
-for gravity pre-fix, entirely unusable) but should still keep a slice of
-real solvable rows around as a distribution-shift check (vocabulary,
-sentence length, number precision) against purely synthetic data.
+Given this, **the right SFT data source is still a per-category decision,
+not a blanket policy** -- though the spread is narrower than it used to be
+now that gravity/unit_conversion both solve real rows at 100%: cipher,
+gravity, and unit_conversion can all lean on real rows directly; cryptarithm
+still needs synthetic-primary generation (real rows stay too sparse, ~8.5%
+solvable). Keeping a slice of real solvable rows around as a distribution-
+shift check (vocabulary, sentence length, number precision) against purely
+synthetic data is still worthwhile regardless.
 
 ### Why the reward functions are shaped differently
 
@@ -496,6 +515,104 @@ synthetic gold traces still all score non-negative; adversarial checks
 (plan-spam, fabricated example, missing conclusion, wrong final answer)
 still behave as designed post-fix.
 
+### The gravity/unit_conversion tolerance-gate fix (why solve rate went 60.4%/82.9% -> 100%/100%)
+
+The user linked two Kaggle discussion posts by huikang (this repo's original
+author, confirmed by pulling `reasoners/gravity.py`/`reasoners/unit_conversion.py`
+directly from his GitHub, `tonghuikang/nemotron`, and diffing) and asked for a
+side-by-side accuracy comparison against this repo. huikang's own solve-rate
+table (discussion 689915) reports **100.0%** on both gravity (1597/1597) and
+unit_conversion (1594/1594) -- against our then-measured 60.4%/82.9%. Every
+other category matched his numbers exactly or within a few rows either way, so
+this was the one real gap worth chasing.
+
+Root cause: `reasoning_gravity`/`reasoning_unit_conversion`'s own foolproof
+gate required **exact string match** (`boxed_answer != round_2dp(problem.answer):
+return None`) against `problem.answer` before returning a trace. But the
+competition's actual official metric (see its "Evaluation" page, quoted
+verbatim) is looser: "A prediction is graded as correct if it matches the
+ground truth either exactly as a string or within a relative numerical
+tolerance of 10^-2." huikang's own `reasoning.py` driver never self-gates at
+all -- it always emits its k/factor estimate and grades separately with
+`math.isclose(rel_tol=1e-2, abs_tol=1e-5)`, matching that rule. Our
+generators' internal gate was strictly *more conservative* than the metric
+they were ultimately trying to satisfy, so they declined (`return None`) on
+every row where the median-of-truncated-divisions estimate was close but not
+byte-exact -- even though the competition itself would have scored that row
+correct.
+
+Verified empirically before changing anything: re-running the existing
+k/factor-estimation math unchanged, just swapping the gate's comparison for
+`rel_tol=1e-2, abs_tol=1e-5`, gave `1597/1597 (100.0%)` gravity and
+`1594/1594 (100.0%)` unit_conversion on the real dataset -- exactly matching
+huikang's reported numbers. The estimation algorithm itself was never the
+problem; only the gate was stricter than the target.
+
+Fixed in both `reasoning_gravity` and `reasoning_unit_conversion`: the gate
+now uses `math.isclose(float(boxed_answer), float(problem.answer), rel_tol=1e-2,
+abs_tol=1e-5)`. This required a design choice on what the emitted `\boxed{}`
+should claim once exact match is no longer required -- **the user chose to
+match huikang's own behavior**: emit the generator's own computed estimate
+(`boxed_answer`), not a copy of `problem.answer`. Concretely this means ~1 in
+6 emitted gravity/unit_conversion traces now state a final answer that is
+within 1e-2 relative tolerance of the true value but not byte-identical to it
+(measured on a 60-row synthetic sample: 50/60 exact, 60/60 within tolerance).
+This is a deliberate tradeoff: the trace is now always *derivation-honest*
+(the boxed answer is what the shown arithmetic actually produces) rather than
+always *literally correct*, at the cost of occasionally teaching the model an
+answer that's off by a fraction of a percent -- acceptable because that's
+exactly what the real evaluation metric tolerates.
+
+Re-verified end to end after the fix: `scripts/eval_train_csv.py` (see below
+for why its own `correct` check also needed the same tolerance) now reports
+`TOTAL 8336/9500 = 87.7%`, matching huikang's target table (`8333/9500 =
+87.7%`) almost exactly. `scripts/gen_synthetic_data.py`'s yield for both
+categories jumped from 92.1%/80.6% to 100%/100% on a smoke sample (30/category).
+
+**`scripts/eval_train_csv.py` needed the same tolerance in its own,
+independent `correct` check.** That script computes `correct` via a second,
+separate exact-string comparison against `problem.answer` (not by trusting
+the generator's own gate) -- reasonable when every generator echoed
+`problem.answer` verbatim, but now systematically wrong for gravity/
+unit_conversion, since their emitted answer can legitimately differ from
+`problem.answer` in the last digit while still being correct. Added a
+`compare_answer()` helper (mirroring huikang's own, and the competition's
+official rule) that treats binary strings ([01]+, to avoid bit_manipulation
+spuriously "matching" via naive float parsing that discards leading zeros)
+as exact-match-only, and everything else as exact-match-or-1e-2-relative-
+tolerance. This is now the metric the whole "accuracy" column in this file
+reflects going forward.
+
+**A second, more serious bug surfaced while validating this fix, and is now
+also fixed: `reward_gravity.py`/`reward_unit_conversion.py`'s own conclusion
+check used a fixed *absolute* tolerance (`abs(final_val - expected) <= 0.01`),
+not the competition's *relative* one.** Once the generators started
+legitimately emitting answers up to ~1% off (by design, per the choice
+above), this mismatch became live: scoring 1500 fresh gold gravity traces
+through `reward_gravity.py` found **114/1500 (7.6%) scored
+`R_terminal_fail`** despite being correct-by-the-actual-metric -- e.g. a
+boxed answer of `1144.88` against a true `1144.60` (0.28 absolute, 0.024%
+relative) failed the old `0.01`-absolute check outright. This would have
+silently fed wrong (negative) reward signal into GRPO for a meaningful slice
+of otherwise-correct gravity rollouts. Fixed in both files: `_TOLERANCE`
+replaced with `_REL_TOLERANCE = 1e-2` / `_ABS_TOLERANCE = 1e-5`, and the
+conclusion check now uses `math.isclose(final_val, expected_answer,
+rel_tol=_REL_TOLERANCE, abs_tol=_ABS_TOLERANCE)` -- the same call shape as
+the generators' own gate. Re-verified: 1500/1500 gold traces now score
+`R_terminal_win` for both categories (0 negative, 0 `R_terminal_fail`), and
+a targeted adversarial check (corrupting the conclusion tag's boxed value by
++20%) still correctly scores `R_terminal_fail` on 50/50 sampled traces --
+the tolerance is calibrated, not simply disabled.
+
+**Not re-measured after this fix**: the SFT-corpus percentile tables and the
+`--probe-headroom` per-category accuracy table further below in this file
+predate this fix and were measured against the old, stricter generators +
+the old, buggy absolute-tolerance reward functions. The GRPO dry-run's
+gold-trace reward ranges/ceilings (`_check_gold_trace_rewards`,
+`Cfg.reward_clip=25.0`) in particular should be re-run before relying on
+them, since the 114/1500 false-negative rate measured above means the old
+gravity numbers in that table understated the true gold-reward floor.
+
 ### unit_conversion's generator fixes (three, not two -- don't assume it's a pure gravity clone)
 
 `unit_conversion.py` was originally a plain-narrative generator (no
@@ -567,25 +684,33 @@ bullet under "Why the reward functions are shaped differently").
   other six now have a hosted-Tinker GRPO script
   (`kaggle/train_grpo_tinker.py`, see "The GRPO training script" below)
   that continues training from the `full_0727` SFT checkpoint, defaulting
-  to `numeral` + `equation_numeric` per ROADMAP Step 7. Neither script has
-  had a real paid run yet -- `train_grpo_tinker.py --dry-run` is verified
-  (see its section), but the actual `forward_backward`/`optim_step` loop
-  has not been exercised against the live service.
+  to `numeral` + `equation_numeric` per ROADMAP Step 7.
+  `train_grpo_tinker.py` **has now had a real paid run** (2026-07-30,
+  gravity + unit_conversion, 30 steps, $9.95 -- see "The first GRPO
+  training run" below); the full `forward_backward`/`optim_step` loop is
+  exercised and produced a significant, paired +13.2pp on both trained
+  categories. `train_grpo_cipher_kaggle.py` (the TRL script) still has not
+  been run. Note the defaults are still `numeral` + `equation_numeric`,
+  which the headroom analysis says are the two *worst* picks available.
 - `bit_manipulation` now has a tagged generator, `reward_bit_manipulation.py`,
   and `monitor_bit_manipulation.py` (**all uncommitted in git as of this
   writing** -- `reasoners/bit_manipulation.py` is modified but not
-  committed, and the other two are untracked new files). **It's still the
-  only generator that violates the foolproof contract**:
-  `scripts/eval_train_csv.py` measured 1364/1602 (85.1%) correct on the full
-  `train.csv` dataset, with 238 rows where `reasoning_bit_manipulation`
-  emitted a fully-formed trace and boxed answer that was simply wrong (it
-  never checks its derived rule against `problem.answer`). The tag-wrapping
-  work wrapped the existing narrative in `<step>` tags without adding that
-  check; `monitor_bit_manipulation.py` routes around it with its own
-  retry loop (discard/retry until the emitted trace happens to match a
-  known synthetic answer), but `reasoning_bit_manipulation` itself still
-  needs the `answer == problem.answer` gate added before it can be trusted
-  as an SFT source the way `equation_numeric.py`'s fix was.
+  committed, and the other two are untracked new files). **Its
+  foolproof-contract gap is fixed (this session).** `scripts/eval_train_csv.py`
+  had measured 1364/1602 (85.1%) correct on the full `train.csv` dataset,
+  with 238 rows where `reasoning_bit_manipulation` emitted a fully-formed
+  trace and boxed answer that was simply wrong -- the tag-wrapping work had
+  wrapped the existing narrative in `<step>` tags without adding the
+  `answer == problem.answer` gate every other generator already had. The
+  gate is now in place (`reasoning_bit_manipulation` evaluates its derived
+  rule vector against `question_bits` via `_evaluate_rule` and returns
+  `None` on mismatch); re-running `scripts/eval_train_csv.py` confirms
+  `solved == correct` at 1364/1364, zero wrong answers.
+  `monitor_bit_manipulation.py`'s own separate retry-until-match check
+  (previously needed to route around the missing gate) was simplified away
+  now that the generator gates internally -- it just retries on `None`,
+  same as `monitor_equation_numeric.py`. See "Two kinds of reasoner module"
+  and the solve-rate table above.
 - **Two SFT training scripts now exist** (stage 2 of the three-stage plan
   under "Project goal"): `kaggle/train_sft_kaggle.py` (local/Kaggle GPU) and
   `kaggle/train_sft_tinker.py` (Thinking Machines' hosted Tinker API), both
@@ -616,17 +741,17 @@ problem inline in `main()` with no reusable function, so this script
 reassembles it from the same pieces with a threaded `random.Random` for
 reproducibility), runs the matching `reasoning_<task>` generator, and keeps
 only verified traces:
-- The 5 foolproof generators (cryptarithm, gravity, numeral,
-  unit_conversion, equation_numeric) are trusted as-is whenever they return
-  non-`None` -- their own `answer == problem.answer` gate already
-  guarantees correctness, and re-parsing their boxed answer here would hit
-  the same brace-balancing hazard the "Gotcha" note above describes for
+- The 6 foolproof generators (cryptarithm, gravity, numeral,
+  unit_conversion, equation_numeric, bit_manipulation) are trusted as-is
+  whenever they return non-`None` -- their own `answer == problem.answer`
+  gate already guarantees correctness, and re-parsing their boxed answer
+  here would hit the same brace-balancing hazard the "Gotcha" note above
+  describes for cryptarithm.
+- cipher (the one generator without a foolproof gate) is additionally
+  checked here: the trace is kept only if its last `\boxed{...}` equals
+  `problem.answer`. Its answers are brace-free (plaintext words), so a
+  naive boxed regex is safe here specifically -- it would not be for
   cryptarithm.
-- cipher and bit_manipulation (the two generators without a foolproof gate)
-  are additionally checked here: the trace is kept only if its last
-  `\boxed{...}` equals `problem.answer`. Both answer types are brace-free
-  (plaintext words / pure binary), so a naive boxed regex is safe for these
-  two specifically -- it would not be for cryptarithm.
 
 **8192-token cap is now enforced during generation, not as a post-hoc
 filter (this session).** Every candidate row's `prompt + "\n" + trace` is
@@ -666,9 +791,13 @@ generation filter (verified independently post-generation: 0/14000 rows
 exceed 8192 Qwen2.5 tokens, max observed 8188). Per-category yields (rows /
 attempts) on this run: bit_manipulation 5.6%, cipher 95.9%, cryptarithm
 55.5%, equation_numeric 55.3%, gravity 92.1%, numeral 100%, unit_conversion
-80.6% -- bit_manipulation's low yield is expected (see "Two kinds of
-reasoner module"'s note on its missing foolproof gate) and cost ~35,500
-attempts for its 2000 rows, still well under the collector's attempt cap.
+80.6% -- bit_manipulation's low yield cost ~35,500 attempts for its 2000
+rows, still well under the collector's attempt cap. **That 5.6% was long
+written off as expected ("it has no foolproof gate"); both halves of that
+were wrong** -- the gate had already been added, and the real cause was
+that the synthetic generator drew a rule distribution the task doesn't
+use. Fixed 2026-07-30, yield now ~63%; see "bit_manipulation's synthetic
+generator modelled the wrong task" below. These 2000 rows predate the fix.
 Corpus integrity re-checked the same way as the original audit below: zero
 unbalanced `<step>`/`</step>` tags, zero rows missing a `conclusion` tag,
 14000/14000 unique `(prompt, trace)` pairs, exact 2000/category balance.
@@ -798,7 +927,77 @@ call):
   survive via `monitor_bit_manipulation.py`'s retry-until-match loop (see
   "Two kinds of reasoner module"), so the kept set is selection-biased
   toward the rules that generator's heuristic happens to land on, and is
-  not a uniform sample of the task.
+  not a uniform sample of the task. **The root cause of that bias is now
+  found and fixed -- see the next section. The 2000 bit_manipulation rows
+  in `synth_sft.jsonl` predate the fix and are the biased slice; regenerate
+  before any bit_manipulation SFT.**
+
+### bit_manipulation's synthetic generator modelled the wrong task (fixed 2026-07-30)
+
+The 5.6% generation yield above and the 85.1% real-`train.csv` solve rate
+looked contradictory -- same solver, same 8-bit problems, real prompts
+carrying 7-10 examples against the synthetic 8. Measured side by side:
+**84.6% (423/500) on real rows vs 6.5% (26/400) on synthetic.** The gap was
+never solver strength; it was that `monitor_bit_manipulation.make_synthetic_
+problem` generated a *different task* from the one `train.csv` poses.
+
+The old `_random_rule_expr` drew each of the 8 output bits' rule
+**independently and uniformly** -- output bit 0 might be `bit3 XOR bit7`,
+bit 1 `NOT bit5`, bit 2 a constant, with no relationship between them. Eight
+unrelated rules are close to uninferable from 8 examples; that's an
+information limit, not a heuristic weakness. More examples barely helped
+(swept 4 -> 24 examples: 4.0% -> 7.5%), which is the signature of
+unidentifiability rather than under-constraint.
+
+What real problems actually look like, measured from the solver's *own*
+derived vectors on 338 real rows it verifiably solves (parsed out of the
+emitted execution step, so these are rules that reproduce the hidden
+answer, not brute-force guesses -- a first attempt at brute-forcing the
+rule space was abandoned as unreliable: candidate ordering biased the family
+counts and 61 bits had no consistent candidate at all, meaning real rules
+use vocabulary outside the obvious grammar):
+
+- consecutive same-family **runs** per problem: 1:31, 2:149, 3:157, 4:1
+- within a run, `(primary - bit_index) % 8` is **constant in 526/533
+  (98.7%)**; `(secondary - bit_index) % 8` in 258/260 (99.2%)
+- family, per output bit: I 1126, const 356, AND 268, XOR 253, XOR-NOT 192,
+  OR 175, OR-NOT 157, NOT 94, AND-NOT 83
+
+That constant-difference property is the whole thing: a real problem is a
+few consecutive bit runs where the *input* position advances in lockstep
+with the output position -- precisely the left/right stride-run
+extrapolation `bit_manipulation.py` searches for (and why its code is
+organized around `left_run`/`right_run` at all). Confirmed causally, not
+just correlationally: one family with a constant stride scores **200/200 =
+100%**, while *family count* is not the driver at all -- drawing all 8 bits
+from a pool of only one family, but with unstructured positions, still
+yields just 8.5%.
+
+`_random_rule_expr` is replaced by `_random_rule_vector`, which samples runs.
+`make_synthetic_problem`'s `num_examples` also became `None`-defaulted and
+now draws 7-10 to match real prompts (measured 116/114/139/131 over 500
+rows), fixing the "fixed example count" complaint above for this category.
+
+**`_RUN_WEIGHTS` is deliberately NOT the measured real frequency.** The
+foolproof gate discards unevenly -- survival by run count is **100% / 97% /
+42%**, since a 3-run vector gives each run fewer bits to pin its family and
+offset from, so the solver more often lands on a different-but-example-
+consistent rule. Weighting by the raw real frequencies produced a *kept*
+corpus at 27/58/15 against a real 9/44/46: systematically easier than the
+real task, i.e. the same class of selection bias the whole fix is about,
+just an order of magnitude smaller. The weights are therefore the real
+frequencies divided by those survival rates, `(6, 28, 67)`. This is the
+generalizable lesson: when a generator is gated by a filter, validate the
+distribution that **survives** the gate, not the one you draw.
+
+Measured after the fix (800 draws): yield **62.9%** (from 6.5%), kept
+runs/problem **11/48/41** vs real 9/44/46, kept family mix within ~1-3pp of
+real on all nine families, examples/problem 7-10 matching real. The
+remaining ~22pp gap to the 84.6% real-row rate is **genuine rule
+ambiguity** -- the solver lands on a different rule that still reproduces
+every example -- which the foolproof gate correctly discards rather than
+emitting a wrong trace. That is not a residual defect and isn't worth
+chasing.
 
 ## The SFT training script
 
@@ -1004,23 +1203,74 @@ end in `}`. The reward call is wrapped in `try/except Exception -> raw =
 bare `float()` on regex-captured (adversarial) trace content and can raise
 on malformed model output.
 
-**Cipher is deliberately excluded** (`REWARDS` has no `"cipher"` entry).
-`reward_cipher.evaluate_structured_trace` takes `(text, oracle_map,
-expected_words)`, not `(text, examples, expected_answer)`, and grades letter
-claims via `oracle_map.get(cipher) == plain` -- a key missing from a partial
-oracle scores as *wrong*, not unknown. A real/synthetic-corpus row's handful
-of example sentences never covers the full 26-letter bijection that reward
-function needs; only a bijection-first construction (`monitor_cipher.py`'s
-pattern, same as `train_grpo_cipher_kaggle.py` already does) can supply a
-complete oracle. Wiring cipher in means a second env/dataset path built that
-way, not reusing `ReasonerEnv`.
+**Cipher was excluded for this reason, and is now wired in (fixed
+2026-07-29).** `reward_cipher.evaluate_structured_trace` takes `(text,
+oracle_map, expected_words)`, not `(text, examples, expected_answer)`, and
+grades letter claims via `oracle_map.get(cipher) == plain` -- a key missing
+from a partial oracle scored as *wrong*, not unknown. A real/synthetic-corpus
+row's handful of example sentences never covers the full 26-letter bijection
+that reward function needs; only a bijection-first construction
+(`monitor_cipher.py`'s pattern, same as `train_grpo_cipher_kaggle.py` already
+does) can supply a complete oracle.
 
-**All five `--dry-run` pre-flight checks are implemented and have been run
-(2026-07-28), $0, no Tinker client constructed.** The first four call
-`REWARDS[cat](...)` directly and never exercise `ReasonerEnv` itself (stop-id
-stripping, the `think_prefix + decode(...)` concatenation, `rpartition(
-"</think>")`, `eval_csv.last_boxed(tail)`, `StepResult` construction) -- a
-gap closed by the fifth:
+`reasoners/reward_cipher_partial.py` (new file; `reward_cipher.py` itself is
+still what `monitor_cipher.py`/`train_grpo_cipher_kaggle.py` use, untouched
+on this point) is a superset that grades a letter outside the oracle on
+self-consistency only -- first claim neutral, reaffirm small/capped under a
+separate ceiling so it can't crowd the budget for a verified reaffirmation,
+contradiction still penalized -- rather than assuming "wrong". Its
+`evaluate_structured_trace_from_examples(text, examples, expected_answer)`
+matches the uniform 3-arg shape and reconstructs the oracle from only the
+prompt's own visible examples (`partial_oracle_from_examples`, the same
+first-mapping-wins rule `cipher.py` uses internally, reimplemented rather
+than imported so this file has no data-generation dependency). `REWARDS` now
+has a `"cipher"` entry pointing at this adapter, so `--categories cipher`
+works end to end (parsing, gold-trace scoring, and
+`_check_env_step_closed_loop` all pass) -- it's just not in the *default*
+category tuple, for the same cost reasons Step 7 chose numeral/
+equation_numeric first (cipher's median trace is ~4700 tokens, and its own
+`_check_trace_length_percentiles`/`_check_policy_length_distribution` still
+warn that the default `Cfg.max_tokens=2048` is too low for it -- raise
+`--max-tokens` when actually enabling it, per Step 8).
+
+While wiring this up, `_check_reward_discrimination` (never previously
+exercised against cipher) surfaced **two independent, pre-existing bugs in
+`reward_cipher.py`'s own scoring**, unrelated to oracle completeness, fixed
+in both `reward_cipher.py` and `reward_cipher_partial.py`:
+1. The dashed-reconstruction verification check could compare an unrelated
+   already-known word's line against a stale `last_best_match_word` left
+   over from an earlier word (same "->"+"-" shape as the genuine
+   reconstruction line). Provably inert on `cipher.py`'s own gold traces
+   (loop 1 always finishes before loop 2 sets `last_best_match_word`), fixed
+   as defense-in-depth by gating on adjacency to the actual "Best match:"
+   line it's meant to follow.
+2. **The actual cause of the discrimination failure**: the "Best match:"
+   dictionary-lookup check graded the resolved word against
+   `expected_words[verified_word_count]` -- treating "how many dictionary
+   lookups have succeeded so far" as the word's position in the question.
+   Those only coincide when every earlier word also needed a lookup; the
+   moment an earlier word was already decodable from the visible examples
+   (common, and never increments that counter), every later lookup got
+   graded against the wrong expected word and failed even when correct.
+   Measured: with the original indexing, 40/80 sampled gold traces (full,
+   real oracle) scored *higher* after every verification step was deleted
+   than intact -- a foolproof-contract gold trace must never score worse for
+   including more honest steps. Fixed by tracking each word's absolute
+   position directly (a queue populated in question order, consumed by each
+   dictionary lookup in turn) instead of the success counter. Re-measured
+   post-fix: 0/150 violations, with both a full and a reconstructed oracle.
+   See `reasoners/reward_cipher_partial.py`'s module docstring for the full
+   writeup, and `scripts/validate_reward_cipher_partial.py` for the
+   validation suite (gold-trace scoring, full-oracle parity with
+   `reward_cipher.py`, and the adversarial checks -- all passing).
+
+**All seven `--dry-run` pre-flight checks are implemented and have been run
+($0, no Tinker client constructed; five on 2026-07-28, two added 2026-07-29 --
+see "Audit fixes" below).** Most call `REWARDS[cat](...)` directly and never
+exercise `ReasonerEnv` itself (stop-id stripping, the `think_prefix +
+decode(...)` concatenation, `rpartition("</think>")`,
+`eval_csv.last_boxed(tail)`, `StepResult` construction) -- a gap closed by
+`_check_env_step_closed_loop`:
 - `_check_sft_holdout`: default categories (`numeral`, `equation_numeric`)
   each have 2000 rows, 300 held out (matching `full_0727`'s
   `category_caps`), 1700 available for GRPO.
@@ -1046,9 +1296,10 @@ gap closed by the fifth:
   HF-template parity holds for this project's prompts.
 - `_check_trace_length_percentiles` (Qwen3.5-4B tokenizer, trace tokens
   only): numeral p50/p95/max = 496/615/702, equation_numeric =
-  342/415/469 -- both comfortably under `Cfg.max_tokens = 1280` (chosen at
-  ~1.8x the observed max, not just p95, so an early-training policy rambling
-  past gold length doesn't get truncated and penalized as a confound). The
+  342/415/469. **These are *gold* trace lengths and are only a lower bound on
+  what the policy emits** -- `Cfg.max_tokens` must be sized from
+  `_check_policy_length_distribution` instead (see "Audit fixes" below; the
+  original 1280 came from this table and was too low). The
   other four categories were also checked at `--max-tokens 8192`: cryptarithm
   1588/1663/1728, gravity 5861/7435/8073, unit_conversion 5303/7280/8025,
   bit_manipulation 6691/6991/7826 -- all pass every check, so enabling them
@@ -1074,6 +1325,458 @@ gap closed by the fifth:
   exception (trap 5) also sets a `reward_exception` metric distinct from
   `reward_raw == -reward_clip`, since a crashing reward function and a
   genuinely terrible completion would otherwise look identical in the logs.
+- `_check_reward_discrimination` (added 2026-07-29): see "Audit fixes" below.
+- `_check_policy_length_distribution` (added 2026-07-29): see "Audit fixes".
+
+### Audit fixes (2026-07-29) -- read this before trusting the numbers above
+
+The script was audited after the checks above were written. Every claim it
+made about `tinker_cookbook` held (`stop_reason` really is passed via
+`ActionExtra`, `rollout_runner.py:412`; `FailFast` really is the default for
+non-Inkling models, `rollout_presets.py:184`; `ProblemGroupBuilder.compute_
+group_rewards` really does return zeros; the SFT-holdout caps/seed really do
+match `full_0727/config.json`; the run really is single-epoch, `for i_batch in
+range(start_batch, end_batch)`, which is what makes the training-set `correct`
+metric an unbiased online estimate -- and what breaks if anyone ever runs more
+than one pass). What the checks did *not* cover was the data and the policy:
+
+- **`Cfg.max_tokens` was sized from the wrong distribution (1280 -> 2048).**
+  It was derived from gold traces (max 469 for equation_numeric) at "~1.8x the
+  observed max". But rollouts come from the *policy*, and
+  `sft_tinker_train_csv_eval.csv` shows the `full_0727` policy at temperature 0
+  already emits far longer output: equation_numeric clean-stop p95 = 3217, max
+  = 7093, with 32/250 samples hitting the sampler cap outright. The number that
+  settles it is the max over *correct* completions -- 759 (numeral) / 1545
+  (equation_numeric): no right answer has ever been longer, so 2048 cannot
+  truncate a correct rollout, while capping the spend on loops at ~25% of what
+  8192 would cost. Truncation above 2048 is now a deliberate penalty on
+  degenerate output, not a confound. `_check_policy_length_distribution` prints
+  this table at `--dry-run` and warns if `max_tokens` drops below 1.2x the
+  longest correct completion.
+- **The cost gate under-reported the spend by ~425x.** `estimate_rollout_cost`
+  assumed `steps = 1` when `--max-steps` was unset -- but unset is the default,
+  and `rl/train.py:1985` then runs a full pass. It now defaults to
+  `len(dataset)` and prints both a worst case (every rollout hits `max_tokens`)
+  and a likely case from the policy's measured mean completion length: 422
+  steps x 64 rollouts, 63.1M worst / 36.8M likely sampling tokens.
+- **Nothing measured whether the policy has headroom -- `--probe-headroom`
+  (PAID) now does.** GRPO's gradient comes entirely from reward variance
+  *inside* a group (`compute_advantages` centers, no std division), so a group
+  whose rollouts all agree contributes nothing. The default categories were
+  picked on cost (ROADMAP Step 7), and the SFT checkpoint's own eval says
+  numeral is at **90.1%** and equation_numeric at **9.3%** on real `train.csv`
+  rows -- one near the ceiling, one near the floor, both shapes where a group
+  of 8 agrees. (That eval is on `train.csv` while GRPO rolls out on
+  `synth_sft.jsonl`, which is in-distribution for SFT and will score better --
+  direction indicative, magnitude not, hence measuring rather than
+  extrapolating.) The probe samples the real policy on the real GRPO pool for
+  ~1.1M tokens (~3% of a full run) and prints, per category, the fraction of
+  groups that are mixed / all-correct / all-wrong, with an explicit verdict:
+  **under ~20% mixed, don't train that category** -- switch to
+  `unit_conversion` (60.8%) or `gravity` (41.4%). Run it before committing to a
+  long run.
+- **Brace-in-answer rows are unwinnable and are now dropped from the GRPO
+  pool.** Every `reward_<task>.py` extracts the boxed answer with a non-greedy
+  `\boxed\{(.*?)\}`, which stops at the first `}`. CLAUDE.md documents this
+  hazard for cryptarithm but it is not confined there: **34/2000 (1.7%)
+  equation_numeric rows in `synth_sft.jsonl` have answers like `'5}'`, `'20{'`,
+  `'{26'`**, and on those even a *gold* trace is graded as wrong (measured gold
+  reward p50 **4.97** vs **17.90** for brace-free rows). For GRPO that is worse
+  than a mis-scored row -- no completion can score well, so the group's reward
+  is uniformly depressed and the centered advantage is pure noise.
+  `_prepare_rows` now drops them via `_answer_is_gradable` and reports the
+  count. Fixing the reward functions' own extraction (to the structural
+  `last_boxed()` technique) is the deeper fix and is still open; it was left
+  alone deliberately, since those are validated files.
+- **`log_dir_behavior` now defaults to `"raise"`, and `--resume-latest`
+  exists.** The old `"ask"` default blocks on stdin -- the same footgun
+  CLAUDE.md already records for `train_sft_tinker.py` under nohup/tmux. Note
+  that unlike the SFT script, **GRPO resume was never actually missing**:
+  `rl/train.py:1924` reads the last checkpoint out of `log_path` and picks
+  `start_batch` up from it. It was merely *unreachable*, because `Cfg.log_dir`
+  defaults to a fresh timestamp, so a re-run after a crash made a new empty dir
+  and paid from step 0. `--resume-latest` points at the newest run with
+  checkpoints; `run_training` also prints the recovery command before the loop.
+- **`_check_reward_discrimination` (new, $0).** `_check_gold_trace_rewards`
+  proves the reward doesn't crash and rates gold highly; it does not prove the
+  reward *separates* right from wrong, which is what decides whether GRPO has
+  any signal at all. Five mutations per gold trace. Measured (p50, 60
+  rows/category): numeral gold 22.05 | answer corrupted 7.05 | bare correct
+  answer 10.00 | bare wrong answer -5.00 | verification steps deleted 13.05 |
+  steps duplicated 22.10. equation_numeric: 17.90 / 2.93 / 10.00 / -5.00 /
+  10.95 / 18.50. **Correctness is worth ~15 points, and deleting verification
+  never once raised the score (0/120 rows)** -- the reward rewards being right
+  and being careful, not merely looking the part. Two findings from it: the
+  brace-in-answer rows above (surfaced as "corrupting the answer changed
+  nothing"), and **padding is free** -- duplicating every pre-conclusion step
+  raised the reward on 36/60 numeral and 60/60 equation_numeric rows. The
+  ceilings bound how far that can go and there is no evidence the policy pads
+  under RL pressure, so this is *instrumented, not fixed*: `ReasonerEnv.step`
+  now emits `completion_tokens` and `n_step_tags` metrics. If `n_step_tags`
+  climbs while `correct` stays flat, that is the moment to add a length
+  penalty, with real data to set it from.
+- **`_check_env_step_closed_loop` now samples 5 rows/category and exercises the
+  failure path.** It previously used `rows[0]` -- the same single row every run
+  -- and only ever fed a perfect completion. It now also drives a deliberately
+  truncated action with `stop_reason="length"`, which is not an edge case (~13%
+  of equation_numeric samples take it) and must come back `truncated=1.0
+  format=0.0 correct=0.0` with a reward below the gold rollout's. Verified:
+  numeral 0.194 vs gold 0.850; equation_numeric -0.182 vs gold 0.118.
+
+**A held-out test set was deliberately NOT added.** `RLDatasetBuilder` can
+return one as its second element (wired to `RLTestSetEvaluator`,
+`train.py:1975`), but it would cost ~512 extra rollouts per eval to buy a
+number the single-epoch property already provides for free. Revisit only if
+the run is ever changed to more than one pass over the data.
+
+### Readiness re-check (2026-07-29, later): the reward works; the default categories don't
+
+All seven `--dry-run` checks were re-run and pass, on four different category
+sets (`numeral,equation_numeric`; `cipher`; `unit_conversion,gravity`).
+`ruff check .` reports 94 findings, **all pre-existing style noise** in
+`reasoners/bit_manipulation.py` (76 of them, old-style `typing` annotations)
+and `scripts/` -- nothing in `kaggle/` or the new cipher reward files.
+
+**New $0 measurement: `scripts/score_policy_completions.py`.** Every reward
+number quoted above comes from a *gold* trace or a mutation of one, which
+shows the reward *can* discriminate, not that it does on what the policy
+emits. This script scores the 250 real `full_0727` completions per category
+already sitting in `sft_tinker_train_csv_eval.csv` through the exact
+`ReasonerEnv.step` reward path. Results (reward p50 for really-correct vs
+really-wrong completions, `agree` = `ReasonerEnv`'s `correct` metric vs the
+independent eval's verdict):
+
+| category | n | fmt | reward correct | reward wrong | agree |
+|---|---|---|---|---|---|
+| numeral | 250 | 100% | 19.50 | 2.85 | 250/250 |
+| cipher | 250 | 81% | 23.70 | 4.80 | 250/250 |
+| unit_conversion | 250 | 91% | 19.85 | 4.08 | 250/250 |
+| gravity | 250 | 91% | 15.30 | -4.35 | 250/250 |
+| cryptarithm | 199 | 96% | 11.43 | -5.92 | 199/199 |
+| equation_numeric | 247 | 87% | 8.43 | -6.60 | 247/247 |
+| bit_manipulation | 250 | 62% | 10.40 | -4.60 | 250/250 |
+
+Three things this establishes that nothing else did: the reward separates
+right from wrong on **real policy output** in all seven categories (gap
+15-20 points everywhere); the trap-5 exception path fires **once in 1,696
+completions** (gravity), so a crashing reward function is not a live risk;
+and `ReasonerEnv`'s `correct` metric agrees with an independent eval on
+**every single scored row**, which matters because that metric is what the
+whole run is judged on.
+
+**Brace-answer rates, measured across the whole GRPO pool** (`synth_sft.jsonl`,
+2000 rows/category) rather than inferred from one category:
+`cryptarithm` **227/2000 = 11.4%**, `equation_numeric` **34/2000 = 1.7%**,
+every other category **0**. (The 51/250 = 20% figure the run above reports
+for cryptarithm is from `train.csv` via the eval CSV, a *different* corpus --
+don't compare the two directly.) `_answer_is_gradable` drops all of these
+from the pool; enabling cryptarithm means losing an eighth of its rows, and
+would have meant an eighth of its groups being pure noise without the fix.
+
+**Trap 3 is now empirically confirmed and is no longer an assumption.** The
+first draft of this script disagreed with the eval on 225/250 numeral rows.
+Cause: the script fed the CSV's stored completion, which ends
+`...\boxed{LVIII}<|im_end|>`, where `ReasonerEnv.step` strips the stop-token
+*id* before decoding. `scripts/eval_sft_tinker_train_csv.py:299` builds that
+column as a bare `tokenizer.decode(sequence.tokens)` on the raw output of a
+real `sample_async` against the live service, with no stripping (its own
+`extract_boxed` docstring says so explicitly) -- so **the stop token really
+is present in sampled tokens**, exactly as `Qwen3Renderer.parse_response`'s
+docstring implied. `ReasonerEnv.step`'s stripping is load-bearing, not
+defensive, and the 225/250 disagreement is a direct demonstration of what
+happens without it. The corresponding bullet under "Assumptions this design
+rests on that were *not* independently verified" is superseded.
+
+**The blocking issue is category selection, and it is not a code fix.**
+GRPO's gradient comes only from reward variance *inside* a group, so a
+category where the policy agrees with itself 8 times out of 8 contributes
+nothing. Per-category accuracy of the `full_0727` policy on real `train.csv`
+rows: numeral **90.0%**, unit_conversion **63.2%**, cipher **53.2%**,
+gravity **45.2%**, equation_numeric **9.6%**, cryptarithm **0.8%**,
+bit_manipulation **0.4%**. The two defaults (chosen on cost, ROADMAP Step 7)
+are the **two worst headroom picks available** -- one nearly saturated, one
+nearly floored. `unit_conversion`/`cipher`/`gravity` sit where group
+disagreement actually lives, but cost ~4x per rollout (8k-token traces vs
+~500). Do not simply swap the defaults from this table: it is single-sample
+at temperature 0 on `train.csv`, whereas the run samples 8x at
+`Cfg.temperature` on in-distribution `synth_sft.jsonl` rows. Measure it with
+`--probe-headroom` (~3% of a full run's tokens), as **two separate
+invocations**, not one:
+
+```
+--probe-headroom --categories numeral,equation_numeric
+--probe-headroom --categories unit_conversion,gravity --max-tokens 10240
+```
+
+`probe_headroom` samples at `cfg.max_tokens`, so probing the 8k-token
+categories at the 2048 default would truncate nearly every rollout into
+`format=0 correct=0`, report uniformly-wrong groups, and return a
+"don't train this" verdict on **precisely the two categories with the most
+headroom**. The high cap costs nothing extra -- sampling bills emitted
+tokens and the cap is only a ceiling.
+
+**The positive reward floor on wrong answers is not a defect.** numeral,
+cipher and unit_conversion all score ~2/3 of their *wrong* completions above
+zero (numeral p50 +2.85, cipher +4.80, unit_conversion +3.80), because a
+well-formed trace earns process credit whether or not it lands the answer.
+This does not matter, because `compute_advantages` centres within a group
+and never uses the absolute level -- only the *ordering* inside one group of
+rollouts on one prompt does any work. Measured as a rank statistic over the
+real completions above (probability a correct completion outscores a wrong
+one, ties half): numeral **0.988**, cipher **0.968**, unit_conversion
+**0.932**, gravity **0.927**, equation_numeric **1.000**. That is a
+pessimistic bound -- these pairs come from *different* problems, so
+cross-problem difficulty variance is folded in, whereas a real group shares
+one prompt. Only 2-3% of wrong completions beat the *median* correct one,
+and none do for numeral/cipher/equation_numeric. Ordering is sound; there is
+no need to push the wrong-answer floor negative, and doing so would discard
+the format signal that makes iteration 0 legible.
+
+The one real consequence to watch: in an **all-wrong** group the surviving
+variance is process-quality only, which is a gradient pointed at "look
+better" rather than "be right". For equation_numeric that variance is tiny
+(wrong-completion p25..p75 spans just 2.1 points, -7.60 to -5.50), so such
+groups contribute nearly nothing -- which is also precisely why
+equation_numeric cannot learn at 9.6% accuracy. This is the same phenomenon
+`remove_constant_reward_groups=True` and the `n_step_tags` instrument
+already exist for.
+
+**Prices are now on file** (read from
+https://tinker-docs.thinkingmachines.ai/tinker/models/ on 2026-07-29 for
+`Qwen/Qwen3.5-4B`, which is **not** among the models carrying that page's
+limited-time 50% discount, so these are final). **Three rates, not one** --
+prompt/prefill **$0.33/M** ($0.066 cached), generated **$1.005/M**, training
+**$0.737/M** (the last matching
+`train_sft_tinker.TRAIN_PRICE_PER_M_TOKENS`). All three are now `Cfg` fields
+and `estimate_rollout_cost` prints the breakdown.
+
+The correction that dominates every other error here: **GRPO bills both
+meters** -- each rollout is sampled *and then* fed to `forward_backward` --
+so training is ~45% of the bill, not zero. `remove_constant_reward_groups`
+(train.py:1822) does drop groups before the train step at :1824, but only on
+*exact* reward equality; with a continuous reward even an all-wrong group
+usually varies slightly, so it cannot be relied on to discount the train
+meter. `probe_headroom` now reports a `constant_reward=` column measuring how
+often it actually fires. The estimate also does not claim the 80% cached-
+prefill discount, so it errs a few percent high.
+
+| what | tokens (likely) | cost (likely) | cost (worst) |
+|---|---|---|---|
+| headroom probe, numeral+equation_numeric | 0.65M | **$0.56** | ~$1.0 |
+| headroom probe, unit_conversion+gravity @10240 | 2.59M | **$2.50** | ~$4.9 |
+| 50 steps, numeral+equation_numeric | 4.4M | **$6.96** | $12.40 |
+| 50 steps, unit_conversion+gravity @10240 | 17.3M | **$29.39** | $58.19 |
+| full epoch (422), numeral+equation_numeric | 36.8M | **$58.76** | $104.68 |
+| full epoch (463), unit_conversion+gravity @10240 | 160.0M | **$272.14** | $538.85 |
+
+The probe costs under 1% of the run it protects, and is sample-meter only
+(it never trains). Capping with `--max-steps` does not break the
+single-epoch property that makes the training-set `correct` metric an
+unbiased online estimate (each row is still seen at most once); the dry run
+now says so when `max_steps` is unset.
+
+### First paid call on the GRPO path: the cryptarithm headroom probe (2026-07-29, ~$0.49)
+
+`--probe-headroom --categories cryptarithm --max-tokens 8192`, 30 groups x 8
+samples against the live `full_0727` sampler. This is the **first real
+`sample_async` on the GRPO path** -- everything before it was `--dry-run`.
+
+```
+cryptarithm  groups=30  mixed=10%  all_correct=0%  all_wrong=90%
+             constant_reward=0%  median_reward_spread=0.510
+             completion_p95=2056  max=3889  truncated=0%
+VERDICT: fewer than 20% of cryptarithm groups carry any gradient.
+```
+
+**Do not RL cryptarithm at its current checkpoint.** But read the rest before
+concluding the category is hopeless -- three findings here generalize:
+
+1. **Latent capability is far above greedy accuracy.** `sft_tinker_train_csv_
+   eval.csv` puts cryptarithm at 0.8% (2/250, temperature 0). The probe found
+   **3/30 groups containing at least one correct rollout** -- so pass@8 at
+   temperature 1 is roughly an order of magnitude above greedy pass@1, and
+   `all_correct=0%` means nothing is saturated. The model is not incapable at
+   cryptarithm, it is unreliable at it. That is the shape SFT fixes, and it is
+   the empirical support for an SFT-then-RL detour on this category. Caveat
+   the sample size honestly: 3/30 has a 95% interval of roughly 2-27%, so this
+   resolves "not 40%+", not "exactly 10%".
+2. **`remove_constant_reward_groups` fires on ZERO groups** -- the
+   `constant_reward=0%` column added for exactly this question. The filter
+   keys on *exact* reward equality, and this reward is continuous enough that
+   even 8 uniformly-wrong rollouts never tie. So it does **not** discount the
+   train meter at all: the cost table above is right as written, and any hope
+   that GRPO would skip paying to train on hopeless groups is dead.
+3. **All-wrong groups carry a large gradient pointed away from correctness --
+   this is now measured, not hypothetical.** The median group (90% of them are
+   all-wrong) has a normalized reward spread of **0.510**, i.e. ~12.75 raw
+   points, comparable to cryptarithm's entire gold-vs-wrong-answer gap (27.61
+   vs 12.61). In an all-wrong group the only surviving variance is process
+   quality, so GRPO would push hard on whatever varies there. Cryptarithm's
+   format rate is already 96%, so little of that headroom is legitimate
+   format learning -- and `_check_reward_discrimination` measured
+   **padding raising the reward on 60/60 cryptarithm rows** (duplicated p50
+   28.89 > gold 27.61). Training a *low-accuracy* category therefore does
+   worse than buy nothing: it actively reinforces padding. The `n_step_tags`
+   instrument was added to detect this; on evidence like the above, a length
+   penalty should be settled **before** any low-accuracy category is trained,
+   not after. Mid-band categories are safer precisely because correctness
+   dominates their in-group variance.
+
+Two smaller notes: `truncated=0%` with `max=3889` means **8192 was
+over-provisioned for cryptarithm** -- 4096 would halve the worst-case cost
+line. And a full cryptarithm epoch is only 188 batches (1502 rows survive the
+brace drop and SFT holdout), so ~$43.92 likely / $175.34 worst -- cheaper
+than the numeral+equation_numeric pair, for anyone revisiting after an SFT
+lift.
+
+Two smaller items found and deliberately left as knobs: **`reward_clip=25.0`
+saturates on gravity** (gold p50 == max == 25.10, so every gold-quality
+rollout normalizes to exactly 1.0 and advantage among correct rollouts
+collapses) -- bump to ~30 if enabling gravity/unit_conversion, noting it
+uniformly shrinks all normalized rewards and so acts as a small LR change.
+(The former "no sampling price on file" gap is closed -- see the price table
+above.)
+
+### The first GRPO training run (2026-07-30): gravity + unit_conversion, 30 steps, $9.95
+
+The first real `forward_backward`/`optim_step` loop against the live service.
+Run dir `grpo_tinker_runs/grpo_uc_gravity_0730/`, continuing from `full_0727`.
+Settings deviating from `Cfg` defaults, each for a reason recorded above:
+`--categories unit_conversion,gravity` (headroom, not cost -- see the probe
+below), `--max-tokens 10240`, `--reward-clip 30` (gravity saturates at 25),
+`--groups-per-batch 4` (halves cost/step, buying 2x the weight updates at a
+fixed budget), `--max-steps 30`.
+
+**Headroom probe first, 20 prompts/category (~$2.3).** `unit_conversion`
+mixed=95%, `gravity` mixed=75%, `all_correct=0%` for both -- decisively past
+the 20% gate, unlike cryptarithm's 10%. Probe size was raised from 12 to 20
+because at 12 the 20% gate falls between 2 and 3 groups, i.e. one group
+flipping changes the verdict; both results landed far enough from the gate
+that this turned out not to be load-bearing.
+
+**Result, paired against the pre-existing `sft_tinker_train_csv_eval.csv`
+("before") on identical real `train.csv` prompts, temperature 0:**
+
+| category | n | before | after | delta | 95% CI | McNemar p |
+|---|---|---|---|---|---|---|
+| gravity | 250 | 45.2% | **58.4%** | **+13.2pp** | [+7.6, +18.8] | <0.0001 |
+| unit_conversion | 250 | 63.2% | **76.4%** | **+13.2pp** | [+7.2, +19.6] | 0.0001 |
+| numeral | 100 | 89.0% | **76.0%** | **-13.0pp** | [-21, -5] | **0.0044** |
+| cipher | 100 | 54.0% | 53.0% | -1.0pp | | 1.0 |
+| cryptarithm | 100 | 2.0% | 0.0% | -2.0pp | | 0.50 |
+| equation_numeric | 100 | 8.0% | 10.0% | +2.0pp | | 0.73 |
+| bit_manipulation | 100 | 0.0% | 0.0% | 0.0pp | | 1.0 |
+
+GRPO works on this stack: both trained categories moved +13.2pp, each
+individually significant. In-distribution (synthetic rollouts, temperature 1,
+pooled first-10 vs last-10 iterations) the gain was **+24.7pp [+10.6, +38.4]**.
+Do not read that as "half transferred": the in-distribution early block
+already contains ~10 iterations of learning, whereas the real-row comparison
+is pre-run vs post-run, so the true in-distribution gain from step 0 is
+larger and the transfer fraction correspondingly lower than half. The safe
+statement is that the training-log gain **overstates** real-row transfer, by
+at least 2x.
+
+**Part of the trained-category gain is length control, not new correctness.**
+Of the wrong->right flips, **8/44 (gravity) and 12/51 (unit_conversion) were
+rows the before-policy had truncated** at the cap with no `\boxed{}` -- worth
+~3.2pp and ~4.8pp of the respective +13.2pp. Rows hitting the length cap fell
+22->13 (gravity) and 22->5 (unit_conversion). Those flips are genuine
+improvements, but the mechanism is the policy learning to finish inside the
+budget, not better arithmetic; the remaining ~8-10pp per category is
+correctness proper. This is the same effect visible in the smoke test, where
+a unit_conversion row went 0%->100% purely because the before-completion ran
+8,393 tokens and got cut off.
+
+**Training on two categories cost a third 13 points, and this is the finding
+most likely to generalize.** `numeral` fell 89% -> 76% (p=0.0044, 16 rows
+right->wrong vs 3 the other way). It is **not** a format failure: 15/16
+regressions kept `closed_think`+`final_boxed` and stopped naturally. What
+changed is length -- on the regressed rows, completions went 305 -> 869
+tokens (+185%) while step tags rose only 15 -> 18 (+20%), and the wrong
+answers are wholly different values (`XXIX`->`LXXIV`, `XCII`->`LXII`), not
+malformed numerals. **The inflation is specific to the rows that broke, which
+is what rules out "longer output is an unrelated symptom":** regressed rows
+went 305 -> 869 (x2.85) while numeral rows that stayed correct went 338 ->
+362 (x1.07). A category-wide style shift would have inflated both equally.
+RL on two categories whose traces run 5-6k tokens of
+arithmetic derivation shifted the policy toward verbose derivation
+*globally*; applied to numeral, whose gold traces are ~500 tokens and nearly
+trivial, the elaboration loses track of the value. **Always pay for the
+regression check on untrained categories** -- without the 100-row slice this
+would have been reported as a clean win. Untrained-category format actually
+*improved* nearly everywhere (equation_numeric 87%->100%, cryptarithm
+93%->98%), so format and accuracy moved in opposite directions on numeral;
+neither is a proxy for the other.
+
+**Process metrics: the padding exploit never materialized.** CLAUDE.md's
+`_check_reward_discrimination` measured padding raising the reward on 60/60
+rows for both categories, so `ReasonerEnv.step`'s `n_step_tags` /
+`completion_tokens` were watched every step against a pre-committed kill rule
+(median `n_step_tags` >1.25x the step-0 baseline sustained 5 steps with
+`correct` flat; plus `truncated` >25% and `frac_mixed` <20%). None fired.
+`n_step_tags` ended at 23.2 against a 24.7 baseline -- *below* it -- and mean
+completion ended at 4,883 against 4,884. There was a mid-run excursion
+(completion peaked 7,274 at step 19, truncation 16% at step 14) that reversed
+on its own. Format rose 0.94 -> 0.99 and truncation fell 6% -> 1% across the
+run. On this evidence a length penalty was correctly *not* added blind.
+
+**Do not read per-step `correct` as a measurement.** At
+`groups_per_batch=4`/`group_size=8` each step is **4 distinct prompts** (2 per
+category) x 8 rollouts, and rollouts in a group share a problem -- so per-step
+`correct` is dominated by which 4 problems were drawn, not by 32 independent
+samples. Observed per-step values swung 0.281 / 0.312 / 0.656 / 0.344 / 0.625
+/ 0.719 / 0.875 with no trend readable from any single pair of points. The
+whole 30-step run is 120 distinct prompts (60/category). Pool blocks of
+iterations and bootstrap over **groups**, not rollouts:
+`scripts/analyze_grpo_rollouts.py` does this from the per-iteration
+`train_rollout_summaries.jsonl` files (which carry per-rollout `correct`,
+`format`, `truncated`, `completion_tokens`, `n_step_tags` and the category
+tag -- richer than `metrics.jsonl`'s per-step means).
+
+**pass@8 barely moved: 0.90 -> 0.95 in-distribution, against +24.7pp on
+per-rollout accuracy.** GRPO here sharpened the distribution toward answers
+the policy could already sometimes reach rather than adding capability -- the
+same latent-capability-vs-reliability distinction the cryptarithm probe
+surfaced. `frac_mixed` correspondingly fell 1.00 -> 0.55 as accuracy rose, so
+each further step carries less gradient; that, not budget, is the argument
+against simply extending this run.
+
+**Evaluating a GRPO checkpoint needed no new eval script, but did need two
+things.** (1) A shim run dir (`grpo_eval_shim/`): a copy of
+`full_0727/config.json` plus a one-record `checkpoints.jsonl` pointing at the
+GRPO `sampler_path`. Reusing the SFT config is what keeps before/after
+comparable -- `prompt_style`, `max_seq_len`, `seed` and `category_caps` drive
+row selection, so the after-run scores byte-identical prompts. (2) A
+`--categories` flag on `scripts/eval_sft_tinker_train_csv.py`, without which
+the planned spend split (250 rows on the trained pair, 100 on the other five)
+could not be expressed and `--per-category 250` would have sampled all 1750
+rows. **That flag has a trap worth preserving**: `select_rows` shares one RNG
+across categories in `CATEGORIES` order, so filtering *before* the shuffle
+shifts every later category's row order and silently selects a different
+subset than an unfiltered run -- breaking comparability while still producing
+plausible numbers. The filter therefore narrows what is *emitted*, never what
+is shuffled; verified by reproducing the before-CSV's gravity/unit_conversion
+rows exactly (250/250) and confirming each 100-row set is a strict prefix of
+its before-250. `scripts/compare_before_after_eval.py` does the paired
+analysis (McNemar exact on discordant pairs + bootstrap CI), which is the
+right test given identical prompts.
+
+**No contamination:** `synth_sft.jsonl`'s 14,000 prompts and `train.csv`'s
+9,500 share **zero** strings, so `train.csv` is genuinely held out from both
+SFT and GRPO. The eval script's own exclusion logic only reproduces the *SFT*
+pool from `config.json` and would not have caught a GRPO-pool collision --
+this was checked corpus-wide instead, which covers any stage.
+
+**Costs, measured not estimated** (`env/all/total_ob_tokens` /
+`total_ac_tokens` per step x the three rates): GRPO **$9.95** for 30 steps
+($0.332/step realized against a $0.283 step-0 rate, the difference being
+mid-run length drift); after-eval + smoke **$4.07** (sample meter only);
+probe ~$2.30. Total ~$16.32. Note the `--dry-run` cost estimator's "likely"
+figure derives from `avg_completion` measured at **temperature 0** and so
+runs low: it predicted $8.50 for 30 steps. The probe's own
+`completion_p95 = max_tokens` for both categories was the early warning that
+temperature-1.0 lengths differ.
 
 ### How this was verified (source-level, against the installed package)
 
@@ -1163,8 +1866,14 @@ Everything below was either inferred from a docstring/type rather than
 observed behavior, or is a deliberate judgment call recorded here so it
 isn't re-litigated silently later:
 
-- **Stop-token inclusion in sampled output (trap 3) is an inference, not an
-  observed fact.** No live `sample_async` call was made (that needs a
+- **Stop-token inclusion in sampled output (trap 3) — SUPERSEDED, now
+  confirmed.** See "Readiness re-check" above: `sft_tinker_train_csv_eval.csv`
+  is built from `tokenizer.decode(sequence.tokens)` on raw live-service
+  samples with no stripping, and its completions demonstrably end
+  `...\boxed{...}<|im_end|>`. The stop token *is* present; the stripping in
+  `ReasonerEnv.step` is load-bearing. The original (now obsolete) reasoning
+  is kept below for context. ~~It is an inference, not an
+  observed fact.~~ No live `sample_async` call was made (that needs a
   `tinker.ServiceClient` and bills the sampling meter), so whether
   `stop_reason == "stop"` sampled tokens actually include the stop-id token
   was never directly observed -- it rests entirely on
@@ -1191,13 +1900,15 @@ isn't re-litigated silently later:
   tokenizer-dependent `build_examples`/`stratified_split` for a benefit
   (a few dozen more available rows out of ~1700/category) judged not worth
   the complexity.
-- **`Cfg.reward_clip = 25.0` and `Cfg.max_tokens` (1280 default; 8192 when
-  the other four categories are enabled) are chosen from the *gold-trace*
-  reward/length distributions**, not from any real policy rollout (none
-  exist yet). An actual early-training policy may ramble longer or shorter
-  than gold traces in ways this can't predict; both are `Cfg` knobs
-  specifically so they can be revisited after the first smoke run's real
-  data, per `_check_trace_length_percentiles`'s own comment.
+- **`Cfg.reward_clip = 25.0` is chosen from the *gold-trace* reward
+  distribution**, not from any real policy rollout (none exist yet). It is a
+  `Cfg` knob specifically so it can be revisited after the first smoke run's
+  real data. `Cfg.max_tokens` **no longer** falls under this caveat: it was
+  2048-ified from the SFT policy's own measured output lengths in the
+  2026-07-29 audit (see "Audit fixes"), not from gold traces. The 8192 figure
+  quoted elsewhere for enabling the other four categories *is* still
+  gold-derived and should be re-checked against
+  `_check_policy_length_distribution` before those are switched on.
 - **Hyperparameters copied from `plan_grpo.txt` are starting points, not
   tuned values**: `learning_rate=1e-5`, `group_size=8`,
   `groups_per_batch=8`, `save_every=5`, `kl_penalty_coef=0.0`,
@@ -1205,12 +1916,12 @@ isn't re-litigated silently later:
   swept or justified beyond "matches the plan's own reasoning" (RL learning
   rate an order of magnitude below SFT's, KL off initially to see the
   unconstrained reward signal first).
-- **No sampling-meter price is on file** (`Cfg.sample_price_per_m_tokens`
-  defaults `None`, unlike `train_sft_tinker.py`'s verified `TRAIN_PRICE_
-  PER_M_TOKENS`) -- the cost estimate this script prints before any paid
-  call is a token count only, not a dollar figure, until a real price is
-  supplied via `--sample-price-per-m-tokens` or looked up at
-  https://tinker-docs.thinkingmachines.ai/tinker/models/.
+- ~~No sampling-meter price is on file~~ **SUPERSEDED**: sampling
+  ($1.005/M) and training ($0.737/M) prices for `Qwen/Qwen3.5-4B` are now
+  `Cfg` defaults and the estimate prints dollars on both meters. See the
+  price table under "Readiness re-check" above. Re-verify at
+  https://tinker-docs.thinkingmachines.ai/tinker/models/ before a large run;
+  Tinker's prices have moved once already.
 - **This session's advisor review caught a real gap**, worth recording as
   process, not just outcome: the first draft of the `--dry-run` checks
   (SFT-holdout, gold-trace rewards, prompt-token-identity, trace-length
@@ -1223,15 +1934,315 @@ isn't re-litigated silently later:
   work on this file is that scoring a reward function in isolation is not
   the same as verifying the environment wrapper around it.
 
-**Not yet done: no paid run.** The `--dry-run` path above is fully verified;
-`--yes`/interactive-confirm and the actual `forward_backward`/`optim_step`
-loop (`run_training`, which resolves the renderer name from the checkpoint's
-own metadata via `checkpoint_utils.resolve_renderer_name_from_checkpoint_or_
-default_async` rather than hardcoding `"qwen3_5"`) have not been exercised
-against the live service. Per ROADMAP Step 4's "deliberate smoke run"
-guidance, the first real invocation should be small (`--max-steps 2
---groups-per-batch 4 --group-size 4`) before a longer run. There is also no
-sampling-meter price on file (`Cfg.sample_price_per_m_tokens` defaults
-`None`); the cost estimate prints token counts only until that's supplied via
-`--sample-price-per-m-tokens` or looked up at
-https://tinker-docs.thinkingmachines.ai/tinker/models/.
+**SUPERSEDED -- the training loop has now been exercised end to end.** As of
+2026-07-30 a full 30-step paid run completed (gravity + unit_conversion,
+$9.95, see "The first GRPO training run" above), covering `--yes`,
+`run_training`'s renderer resolution from checkpoint metadata,
+`forward_backward`/`optim_step`, periodic + final checkpointing, and the
+resulting checkpoint being sampled by the eval script. The original text is
+kept below for the reasoning it records, which still holds for any *new*
+category: the recommended first paid call on an untried category remains
+`--probe-headroom`, not a training smoke run, because `--dry-run` already
+covers the plumbing (including the env's own `step()`) while only the probe
+answers whether training that category can accomplish anything. That ordering
+was followed here and correctly redirected the run away from the default
+`numeral`/`equation_numeric` pair. ~~`--probe-headroom` has
+now been run once for real (cryptarithm, ~$0.49 -- see "First paid call on the
+GRPO path" above), which exercised `sample_async`, `create_sampling_client_
+async`, the `ReasonerEnv` round trip on live samples, and the verdict logic.
+The training loop itself is still unexercised.~~ ~~There is also no
+sampling-meter price on file~~ -- superseded, all three prices are `Cfg`
+defaults; re-verify at
+https://tinker-docs.thinkingmachines.ai/tinker/models/ before a large run.
+
+## Evaluation: every measurement in this repo, step by step
+
+This project has evaluation at five different layers, and they measure
+genuinely different things -- a green light at one layer says nothing about
+the next. In pipeline order: (1) can the deterministic generator solve the
+task at all, (2) does the reward function score traces correctly, (3) did SFT
+teach the output format, (4) can the trained policy actually answer real
+questions, (5) did GRPO improve that. Most confusion in this repo's history
+came from reading a layer-N result as evidence about layer N+1.
+
+### What was trained, on what, with which framework
+
+| | |
+|---|---|
+| base model | `Qwen/Qwen3.5-4B`, LoRA (rank in `full_0727/config.json`) |
+| framework | Thinking Machines **Tinker** (`tinker` 0.23.4 + `tinker-cookbook` 0.5.2), hosted -- model runs server-side, this repo's process drives the loop |
+| SFT data | **`synth_sft.jsonl`** -- 14,000 rows, 2000/category, **100% synthetic**, built by `scripts/gen_synthetic_data.py` from each `monitor_<task>.py`'s top-down problem constructor + the deterministic `reasoning_<task>` generator |
+| SFT run | `sft_tinker_runs/full_0727/` -- 1376 train / 73 val rows, 4,043,134 train tokens, 22 optimizer steps, ~$2.98 |
+| GRPO data | the same `synth_sft.jsonl`, **minus** every row `full_0727` could have trained on (`sft_holdout_keys`), parsed into examples via `scripts/eval_train_csv.PARSERS` |
+| GRPO run | `grpo_tinker_runs/grpo_uc_gravity_0730/` -- gravity + unit_conversion, 30 steps, 960 rollouts, $9.95 |
+| eval set | **`train.csv`** -- 9500 real competition rows, **never trained on at any stage** |
+
+**No train/eval contamination, verified corpus-wide**: `synth_sft.jsonl`'s
+14,000 distinct prompts and `train.csv`'s 9,500 share **zero** strings. This
+matters because `eval_sft_tinker_train_csv.py`'s built-in exclusion only
+reconstructs the *SFT* pool from `config.json` and would not have caught a
+GRPO-pool collision. The corpus-wide check covers any stage.
+
+The local/Kaggle alternatives (`train_sft_kaggle.py` on `transformers.Trainer`,
+`train_grpo_cipher_kaggle.py` on TRL `GRPOTrainer`) exist and the SFT one is
+verified end to end on bf16, but **neither produced the real runs** -- the
+merged SFT model is 9.3 GB bf16 against a 5.67 GiB local GPU, so both real
+stages ran on Tinker.
+
+### Layer 1 -- deterministic generator coverage ($0)
+
+`uv run python scripts/eval_train_csv.py` runs all seven `reasoning_<task>`
+generators against all 9500 real rows and writes
+`reasoners_train_csv_eval.csv`. **This measures whether a gold SFT trace can
+be *sourced* for a row, not whether any model can solve it.**
+
+Metrics: `solved` (generator returned non-`None`) and `correct` (its boxed
+answer matches `train.csv`'s, via `compare_answer()`'s exact-or-1e-2-relative
+rule, binary strings exact-only). For the six foolproof generators these are
+equal by construction -- the contract is `return None` rather than emit an
+unverified trace. **TOTAL 8336/9500 = 87.7%.** Per-category numbers and the
+history behind each are in "How training data is actually generated".
+
+### Layer 2 -- reward-function correctness ($0)
+
+Four independent checks, because a reward function that crashes or misranks
+poisons GRPO silently:
+
+1. **`uv run python -m reasoners.monitor_<task>`** -- generate one synthetic
+   problem, run the generator, score it, print the step-by-step reward log.
+   Eyeball-level, one trace.
+2. **Gold-trace non-negativity at scale** -- a few hundred synthetic gold
+   traces per category, asserting none score negative. A gold trace is fully
+   correct by the foolproof contract, so a negative score is a reward bug.
+3. **Adversarial traces** -- fabricated claims, tag-spam, self-contradiction,
+   dishonest verification labels, copying visible prompt text. Must score
+   negative or flat.
+4. **`scripts/validate_reward_cipher_partial.py`** -- the same three for
+   `reward_cipher_partial.py`, plus full-oracle parity against
+   `reward_cipher.py`.
+
+`kaggle/train_grpo_tinker.py --dry-run` folds 2 and 3 into
+`_check_gold_trace_rewards` and `_check_reward_discrimination`. The latter is
+the one that matters: it proves the reward *separates* right from wrong
+(numeral gold 22.05 vs corrupted-answer 7.05 vs bare-wrong -5.00), which
+`_check_gold_trace_rewards` alone does not.
+
+**`scripts/score_policy_completions.py` ($0) closes the last gap in this
+layer**: every number above comes from a gold trace or a mutation of one. This
+scores 250 *real policy completions* per category, already sitting in
+`sft_tinker_train_csv_eval.csv`, through the exact `ReasonerEnv.step` reward
+path. The reward separates right from wrong on real output in all seven
+categories (15-20 point gap), `ReasonerEnv`'s `correct` metric agreed with the
+independent eval on **1696/1696** rows, and the exception path fired once.
+
+### Layer 3 -- did SFT teach the format? (training metrics)
+
+Tinker writes one JSON per optimizer step to `<run>/metrics.jsonl`. The
+load-bearing key is **`_loss_per_token`**, plus a per-category
+`_loss_per_token/<category>` breakdown and `_min_logprob/<category>`.
+
+`full_0727`, 22 steps:
+
+| step | overall | equation_numeric | cryptarithm | numeral | gravity | unit_conversion |
+|---|---|---|---|---|---|---|
+| 0 | 0.334 | 1.492 | 0.577 | 0.542 | 0.132 | 0.162 |
+| 11 | 0.056 | 0.078 | 0.056 | 0.019 | 0.011 | 0.009 |
+| 21 | **0.016** | 0.046 | 0.029 | 0.008 | 0.002 | 0.001 |
+
+Monotone decrease, overall and per category. **What this does NOT establish**
+is that the model can produce the format unprompted -- loss-per-token is
+teacher-forced. That needs generation, which is why the SFT script ends with a
+sampling smoke test checking `</think>` present, `<think>` absent (the chat
+template already opens it -- see [[step-tag-format-check-pitfalls]]), and
+`\boxed{` in the tail *after* `</think>`. All 3 sampled completions came back
+`closed_think=True final_boxed=True stop=stop`.
+
+### Layer 4 -- can the policy answer real questions? (paid)
+
+`uv run python scripts/eval_sft_tinker_train_csv.py --run-dir <run> --yes`
+samples a checkpoint on real `train.csv` rows at **temperature 0**, 250 per
+category (1750 rows) by default, and writes a self-documenting CSV plus a
+provenance manifest. `--categories` narrows the set; `--limit 7 --yes` is the
+~$0.05 smoke test; without `--yes` it previews for free.
+
+It records **correctness** (`correct`, vs the ground-truth answer column) and
+**six independent format signals**, which is what makes it useful for
+diagnosing *why* a category fails:
+
+| column | meaning |
+|---|---|
+| `closed_think` | emitted a closing `</think>` |
+| `has_step_tags` | emitted `<step type=...>` at all |
+| `n_step_tags` / `step_tag_counts` | how many, and of which types -- **the step-tag-emission metric** |
+| `has_conclusion_tag` | reached a `conclusion` step |
+| `unbalanced_step_tags` | open/close counts disagree (the truncation signature) |
+| `unknown_step_tags` | tags outside the six-tag vocabulary |
+| `reopened_think` | re-opened `<think>` after closing (never observed: 0% everywhere) |
+| `stop_reason` / `n_tokens` | natural stop vs hitting the cap, and **completion length** |
+
+**Baseline, `full_0727` SFT checkpoint, 250 rows/category, temperature 0:**
+
+| category | acc | closed | boxed | unbal | concl | tok p50 | tok p95 | avg tags | stop=length |
+|---|---|---|---|---|---|---|---|---|---|
+| numeral | 90.0% | 100% | 100% | 0% | 100% | 326 | 457 | 16.1 | 0% |
+| unit_conversion | 63.2% | 91% | 91% | 0% | 91% | 5473 | 8405 | 21.6 | 9% |
+| cipher | 53.2% | 81% | 81% | 48% | 74% | 5403 | 8394 | 211.0 | 19% |
+| gravity | 45.2% | 91% | 91% | 0% | 91% | 4302 | 8349 | 25.0 | 9% |
+| equation_numeric | 9.6% | 87% | 87% | 38% | 83% | 491 | 8413 | 21.9 | 13% |
+| cryptarithm | 0.8% | 96% | 95% | 7% | 94% | 1656 | 2359 | 75.4 | 4% |
+| bit_manipulation | 0.4% | 62% | 62% | 39% | 61% | 7411 | 8291 | 8.1 | 38% |
+
+Read the columns together, not the accuracy alone: `bit_manipulation` is 38%
+length-stopped with 39% unbalanced tags, so much of its 0.4% is *never
+finishing*, a different failure from `cryptarithm`, which finishes cleanly
+(96% closed, 4% length-stopped) and is simply wrong. Only two unknown step
+tags appeared across all 1750 rows (`cipher:match`, `cipher:answer`, 1 each),
+so the six-tag vocabulary held up. `cipher`'s 211 average tags reflects its
+per-letter granularity -- the same shape flagged under "Two kinds of reasoner
+module".
+
+### Layer 5 -- did GRPO improve it?
+
+**Pre-flight, $0** -- seven `--dry-run` checks (`_check_sft_holdout`,
+`_check_gold_trace_rewards`, `_check_reward_discrimination`,
+`_check_prompt_token_identity`, `_check_trace_length_percentiles`,
+`_check_policy_length_distribution`, `_check_env_step_closed_loop`). Detailed
+under "The GRPO training script".
+
+**Headroom probe, paid** -- `--probe-headroom`. The gate that decides whether
+a category is trainable at all: GRPO's gradient comes only from reward
+variance *inside* a group, so a category the policy gets 8/8 right or 8/8
+wrong contributes nothing. Reports `mixed` / `all_correct` / `all_wrong` /
+`constant_reward` / `median_reward_spread` per category, verdict at 20% mixed.
+Measured: cryptarithm 10% (don't train), unit_conversion 95% and gravity 75%
+(train). Use >=20 prompts/category -- at 12 the gate falls between 2 and 3
+groups.
+
+**Per-step training metrics** -- `<run>/metrics.jsonl`, keys under
+`env/all/*` and `env/<category>/*`: `correct`, `format`, `truncated`,
+`reopened_think`, `reward/total`, `reward_raw`, `reward_exception`,
+**`completion_tokens`**, **`n_step_tags`**, `by_group/frac_mixed`,
+`frac_all_good`, `frac_all_bad`, and exact `total_ob_tokens` /
+`total_ac_tokens` counters (use these for cost, not means). The last two
+env metrics exist specifically to detect reward hacking, since
+`_check_reward_discrimination` measured padding raising the reward on 60/60
+rows.
+
+**Never read a single step as a result.** See
+[[grpo-per-step-metrics-are-noisy]]: a step is `groups_per_batch` distinct
+prompts (4) x `group_size` correlated rollouts, so per-step `correct` swings
+wildly (observed 0.281 / 0.312 / 0.656 / 0.344 / 0.625 / 0.719 / 0.875 in one
+healthy run). Use **`scripts/analyze_grpo_rollouts.py <run> <block>`**, which
+pools blocks of iterations from the per-iteration
+`train_rollout_summaries.jsonl` files (per-rollout `correct`, `format`,
+`truncated`, `completion_tokens`, `n_step_tags` + category tag) and
+bootstraps over **groups**.
+
+**Paired before/after on real rows** --
+`scripts/compare_before_after_eval.py BEFORE.csv AFTER.csv [...]`. Because
+both eval runs select from the same seeded pool, every after-row has a
+same-prompt before-row, so the correct test is **McNemar's exact on the
+discordant pairs** plus a bootstrap CI, not two independent proportions.
+Evaluating a GRPO checkpoint needs a shim run dir (`grpo_eval_shim/`: a copy
+of the SFT `config.json` + a one-record `checkpoints.jsonl` pointing at the
+GRPO `sampler_path`) -- reusing the SFT config is what keeps row selection
+identical and the comparison honest.
+
+**Result after 30 GRPO steps on gravity + unit_conversion** (full tables and
+caveats under "The first GRPO training run"):
+
+| category | trained? | n | acc before | acc after | delta | McNemar p |
+|---|---|---|---|---|---|---|
+| gravity | yes | 250 | 45.2% | 58.4% | **+13.2pp** | <0.0001 |
+| unit_conversion | yes | 250 | 63.2% | 76.4% | **+13.2pp** | 0.0001 |
+| numeral | no | 100 | 89.0% | **76.0%** | **-13.0pp** | 0.0044 |
+| equation_numeric | no | 100 | 8.0% | 10.0% | +2.0pp | 0.73 |
+| cipher | no | 100 | 54.0% | 53.0% | -1.0pp | 1.0 |
+| cryptarithm | no | 100 | 2.0% | 0.0% | -2.0pp | 0.50 |
+| bit_manipulation | no | 100 | 0.0% | 0.0% | 0.0pp | 1.0 |
+
+The untrained categories are scored on **100 rows, a strict prefix of the same
+seeded 250** the Layer-4 baseline table uses, so their "before" figures differ
+slightly from it by subsampling alone (numeral 89.0% here vs 90.0% at n=250,
+cipher 54.0% vs 53.2%, cryptarithm 2.0% vs 0.8%). Every row is still paired
+against its own before-row, so the deltas are unaffected.
+
+**What GRPO did after SFT, in the format metrics** (untrained categories at
+100 rows, trained at 250):
+
+| category | closed/boxed | unbalanced | avg tags | tok p50 | tok p95 | stop=length |
+|---|---|---|---|---|---|---|
+| unit_conversion | 91% -> **98%** | 0% -> 0% | 21.6 -> 22.0 | 5473 -> 5322 | 8405 -> **7535** | 9% -> **2%** |
+| gravity | 91% -> **95%** | 0% -> 1% | 25.0 -> 25.9 | 4302 -> 4277 | 8349 -> 8345 | 9% -> **5%** |
+| equation_numeric | 87% -> **100%** | 38% -> **0%** | 21.9 -> 13.4 | 491 -> 378 | 8413 -> **502** | 13% -> **0%** |
+| cryptarithm | 96% -> 98% | 7% -> 8% | 75.4 -> 67.9 | 1656 -> 1590 | 2359 -> 2077 | 4% -> 2% |
+| numeral | 100% -> 99% | 0% -> 1% | 16.1 -> **18.6** | 326 -> 353 | 457 -> **609** | 0% -> 1% |
+| cipher | 81% -> 78% | 48% -> 50% | 211 -> 224 | 5403 -> 5392 | 8394 -> 8400 | 19% -> 22% |
+| bit_manipulation | 62% -> 60% | 39% -> 47% | 8.1 -> 5.9 | 7411 -> 7566 | 8291 -> 8291 | 38% -> 40% |
+
+Three things this table says that the accuracy table does not:
+
+1. **GRPO's clearest effect was teaching the policy to stop.** Length-stopping
+   collapsed on the trained pair (9%->2%, 9%->5%) and on *untrained*
+   `equation_numeric` (13%->0%, p95 8413->502, unbalanced tags 38%->0%, format
+   to a perfect 100%). Part of the trained-pair accuracy gain is exactly this:
+   8/44 and 12/51 of the wrong->right flips were rows the before-policy had
+   truncated. **But note equation_numeric's format windfall bought nothing
+   measurable** -- its accuracy moved +2.0pp at p=0.73. This is the same
+   global length/stopping shift that *hurt* numeral; it is not a separate
+   positive spillover, and only the numeral effect is statistically
+   established.
+2. **The numeral regression is visible here as length**, in the opposite
+   direction: p95 457 -> 609, avg tags 16.1 -> 18.6. See
+   [[grpo-cross-category-regression]].
+3. **Format and accuracy move independently.** `cryptarithm` improved format
+   and went 2% -> 0% accuracy; `equation_numeric` hit perfect format at 10%
+   accuracy. Never use format as an accuracy proxy.
+
+### Cost limitation -- what the evaluation budget could and could not buy
+
+Every layer-4 and layer-5 number is **metered**: Tinker bills prompt/prefill
+$0.33/M, generated $1.005/M, training $0.737/M for `Qwen/Qwen3.5-4B`. GRPO
+bills *both* sampling and training meters, and `remove_constant_reward_groups`
+measured **0%** firing on a real probe, so it discounts nothing. This
+constrained the design in ways worth stating plainly, because several numbers
+above are smaller-sample than they look:
+
+- **The whole GRPO run was 30 steps / 960 rollouts / $9.95**, against a full
+  epoch of 925 steps (~$272). That is **120 distinct prompts** (60/category).
+  A null result at this size would have been uninformative; the observed
+  effect was large enough to clear it anyway, but per-category CIs are wide
+  ([+7.6, +18.8] and [+7.2, +19.6]).
+- **The SFT-then-RL detour was cut for budget** ($9-26 on its own). GRPO was
+  run directly on the `full_0727` checkpoint instead, which is why
+  low-accuracy categories (cryptarithm 0.8%, bit_manipulation 0.4%) were
+  never trainable in this cycle -- the probe says so, and lifting them needs
+  SFT first.
+- **The regression check was deliberately 100 rows/category, not 250** --
+  **$1.52 measured** for its 500 rows (vs $2.53 for the trained pair's 500,
+  which carry much longer traces; ~$3.79 is the *scaled* estimate for a
+  250-row version, and scaling is only roughly valid here since per-category
+  completion length spans ~20x, numeral ~350 tokens vs bit_manipulation
+  ~7,500). 100 rows is enough to detect numeral's -13pp at p=0.0044 but not
+  enough to resolve a small regression; cipher's -1.0pp and
+  equation_numeric's +2.0pp are indistinguishable from zero at this n and
+  should not be read as real.
+- **The before-eval was reused, not re-paid.** `sft_tinker_train_csv_eval.csv`
+  already existed at 250 rows/category, and the `--categories` flag was
+  written specifically so the after-eval could sample a comparable subset
+  rather than repurchase all 1750 rows.
+- **Total for the whole GRPO cycle: ~$16.32** -- probe ~$2.30, training $9.95,
+  after-eval + smoke $4.07 (measured from `total_ob_tokens`/`total_ac_tokens`
+  and the eval CSVs' own token columns, not estimated).
+- **The `--dry-run` cost estimator runs low.** Its "likely" figure derives
+  from `avg_completion` measured at temperature 0; it predicted $8.50 for the
+  30 steps that actually cost $9.95. The probe's `completion_p95 == max_tokens`
+  for both categories was the early warning that temperature-1.0 lengths
+  differ.
+
+The general rule this cycle established: **spend on the measurement that
+decides whether to spend.** The $2.30 probe redirected the run away from the
+default `numeral`/`equation_numeric` pair (90% and 9.6% accuracy -- nearly
+saturated and nearly floored, the two worst headroom picks available), and the
+$1.68 regression slice was the only thing that caught a 13-point loss on a
+category nobody was training.

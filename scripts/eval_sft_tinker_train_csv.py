@@ -159,13 +159,33 @@ def load_eligible_pool(exclude: set[str]) -> tuple[dict[str, list[dict]], dict[s
     return pool, dict(excluded_by_cat)
 
 
-def select_rows(pool: dict[str, list[dict]], per_category: int, seed: int) -> list[dict]:
-    """Round-robin across categories so --limit N is a spread smoke test, not one category."""
+def select_rows(
+    pool: dict[str, list[dict]],
+    per_category: int,
+    seed: int,
+    categories: list[str] | None = None,
+) -> list[dict]:
+    """Round-robin across categories so --limit N is a spread smoke test, not one category.
+
+    `categories` narrows which categories are *emitted*, not which are shuffled.
+    That distinction is load-bearing: one rng is shared across the loop, so each
+    category's shuffle depends on how many draws preceded it. Skipping a
+    category before its shuffle would shift every later category's row order and
+    silently select a different subset than an unfiltered run did -- which would
+    break before/after comparability against an eval CSV produced without the
+    filter. So always shuffle all seven in the same order, then subset.
+
+    For the same reason, rows[:100] is a strict prefix of rows[:250] at a given
+    seed, so a 100-row regression check is directly comparable to a 250-row run.
+    """
+    wanted = set(categories) if categories else set(CATEGORIES)
     rng = random.Random(seed)
     shuffled = {}
     for cat in CATEGORIES:
         rows = list(pool.get(cat, []))
-        rng.shuffle(rows)
+        rng.shuffle(rows)  # must happen for every category, filtered or not
+        if cat not in wanted:
+            continue
         if len(rows) < per_category:
             print(f"WARNING: only {len(rows)} eligible rows for {cat!r} (wanted {per_category}); taking all")
         shuffled[cat] = rows[:per_category]
@@ -173,7 +193,7 @@ def select_rows(pool: dict[str, list[dict]], per_category: int, seed: int) -> li
     selected: list[dict] = []
     for i in range(per_category):
         for cat in CATEGORIES:
-            if i < len(shuffled[cat]):
+            if cat in shuffled and i < len(shuffled[cat]):
                 selected.append(shuffled[cat][i])
     return selected
 
@@ -490,6 +510,14 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--run-dir", default=DEFAULT_RUN_DIR)
     parser.add_argument("--checkpoint", default="final", help="name in checkpoints.jsonl")
     parser.add_argument("--per-category", type=int, default=250)
+    parser.add_argument(
+        "--categories",
+        type=str,
+        default=None,
+        help="comma-separated subset to evaluate (default: all 7). Row selection is "
+        "unaffected by this filter, so a subset run is directly comparable to a "
+        "full run at the same --seed -- see select_rows().",
+    )
     parser.add_argument("--limit", type=int, default=None, help="cap total rows sampled (smoke test)")
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--concurrency", type=int, default=8, help="max in-flight Tinker sample_async calls")
@@ -510,9 +538,16 @@ def main(argv: list[str] | None = None) -> None:
     excl = training_prompts(cfg)
     print(f"{len(excl)} distinct prompts in the run's training/val pool (excluded from eval)")
 
+    cats = None
+    if ns.categories:
+        cats = [c.strip() for c in ns.categories.split(",") if c.strip()]
+        unknown = [c for c in cats if c not in CATEGORIES]
+        if unknown:
+            raise SystemExit(f"unknown category/ies {unknown}; choose from {CATEGORIES}")
+
     pool, excluded_by_cat = load_eligible_pool(excl)
     eligible_by_cat = {cat: len(pool.get(cat, [])) for cat in CATEGORIES}
-    rows = select_rows(pool, ns.per_category, ns.seed)
+    rows = select_rows(pool, ns.per_category, ns.seed, cats)
     if ns.limit is not None:
         rows = rows[: ns.limit]
 
@@ -535,6 +570,7 @@ def main(argv: list[str] | None = None) -> None:
         "temperature": ns.temperature,
         "seed": ns.seed,
         "per_category_requested": ns.per_category,
+        "categories_requested": cats or CATEGORIES,
         "limit": ns.limit,
         "out_csv": str(out_path),
         "eligible_by_category": eligible_by_cat,
