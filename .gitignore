@@ -16,3 +16,7 @@ ROADMAP.md
 sft_tinker_train_csv_eval.csv
 sft_tinker_train_csv_eval.manifest.json
 plan_grpo.txt
+grpo_eval_shim/
+grpo_tinker_runs/
+artifacts/
+synth_sft_hard3.jsonl

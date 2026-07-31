@@ -1,0 +1,868 @@
+<title>SFT checkpoint eval — full_0727 on train.csv</title>
+
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+
+  :root {
+    color-scheme: light;
+
+    /* neutrals, biased slightly cool toward the data blue */
+    --plane:        #f1f4f6;
+    --surface:      #fdfdfe;
+    --surface-sunk: #f6f8f9;
+    --ink:          #0e1518;
+    --ink-2:        #4d585c;
+    --ink-3:        #7f8a8e;
+    --rule:         #e0e6e8;
+    --rule-strong:  #c6ced1;
+
+    /* page chrome accent = darkest step of the data hue, so page and charts read as one system */
+    --accent:       #184f95;
+    --accent-wash:  #e8eff8;
+
+    /* data marks — dataviz reference palette, slots 1 & 2, validated on this surface */
+    --series-1:     #2a78d6;
+    --series-1-dim: #b7d3f6;
+    --series-2:     #eb6834;
+    --series-2-dim: #f8ddd2;
+
+    /* status — fixed, never themed */
+    --good:         #0ca30c;
+    --warning:      #fab219;
+    --critical:     #d03b3b;
+    --good-wash:    #e6f6e6;
+    --warning-wash: #fdf3de;
+    --critical-wash:#fae9e9;
+
+    --serif: ui-serif, "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) {
+      color-scheme: dark;
+      --plane:        #0a0c0d;
+      --surface:      #16191a;
+      --surface-sunk: #1d2122;
+      --ink:          #f2f5f6;
+      --ink-2:        #b3bdc0;
+      --ink-3:        #838d90;
+      --rule:         #2b3032;
+      --rule-strong:  #3d4446;
+      --accent:       #86b6ef;
+      --accent-wash:  #182634;
+      --series-1:     #3987e5;
+      --series-1-dim: #1e3d5c;
+      --series-2:     #d95926;
+      --series-2-dim: #4a2717;
+      --good-wash:    #122a12;
+      --warning-wash: #33280c;
+      --critical-wash:#331717;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --plane:        #0a0c0d;
+    --surface:      #16191a;
+    --surface-sunk: #1d2122;
+    --ink:          #f2f5f6;
+    --ink-2:        #b3bdc0;
+    --ink-3:        #838d90;
+    --rule:         #2b3032;
+    --rule-strong:  #3d4446;
+    --accent:       #86b6ef;
+    --accent-wash:  #182634;
+    --series-1:     #3987e5;
+    --series-1-dim: #1e3d5c;
+    --series-2:     #d95926;
+    --series-2-dim: #4a2717;
+    --good-wash:    #122a12;
+    --warning-wash: #33280c;
+    --critical-wash:#331717;
+  }
+
+  /* ---------- base ---------- */
+
+  body {
+    margin: 0;
+    background: var(--plane);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: 68rem;
+    margin: 0 auto;
+    padding: clamp(1.25rem, 3vw, 3rem) clamp(1rem, 3vw, 2.5rem) 5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 2.75rem;
+  }
+
+  p { max-width: 66ch; margin: 0; color: var(--ink-2); }
+  p + p { margin-top: 0.7em; }
+  strong { color: var(--ink); font-weight: 620; }
+
+  a { color: var(--accent); text-underline-offset: 2px; }
+  a:focus-visible, summary:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: 2px;
+  }
+
+  code, .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  code {
+    font-size: 0.86em;
+    background: var(--surface-sunk);
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    padding: 0.05em 0.32em;
+  }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    margin: 0;
+  }
+
+  /* ---------- masthead ---------- */
+
+  .masthead { display: flex; flex-direction: column; gap: 1.5rem; }
+
+  .masthead h1 {
+    font-family: var(--serif);
+    font-weight: 600;
+    font-size: clamp(2rem, 5.2vw, 3.1rem);
+    line-height: 1.08;
+    letter-spacing: -0.015em;
+    text-wrap: balance;
+    margin: 0;
+  }
+
+  .masthead h1 .sub {
+    display: block;
+    font-size: clamp(1rem, 2.4vw, 1.35rem);
+    font-weight: 400;
+    font-style: italic;
+    color: var(--ink-2);
+    letter-spacing: 0;
+    margin-top: 0.35rem;
+  }
+
+  .provenance {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+    gap: 0.1rem 1.75rem;
+    padding: 1.15rem 1.35rem;
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-left: 3px solid var(--accent);
+    border-radius: 2px;
+  }
+  .provenance div { padding: 0.4rem 0; }
+  .provenance dt {
+    font-family: var(--mono);
+    font-size: 0.66rem;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+  }
+  .provenance dd {
+    margin: 0.15rem 0 0;
+    font-family: var(--mono);
+    font-size: 0.83rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--ink);
+    word-break: break-word;
+  }
+
+  /* ---------- stat tiles ---------- */
+
+  .tiles {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+    gap: 1px;
+    background: var(--rule);
+    border: 1px solid var(--rule);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  .tile {
+    background: var(--surface);
+    padding: 1.15rem 1.3rem 1.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+  }
+  .tile .val {
+    font-family: var(--serif);
+    font-size: 2.4rem;
+    line-height: 1;
+    letter-spacing: -0.02em;
+    color: var(--ink);
+  }
+  .tile .val small {
+    font-family: var(--mono);
+    font-size: 0.8rem;
+    letter-spacing: 0;
+    color: var(--ink-3);
+    margin-left: 0.3rem;
+  }
+  .tile .lab { font-size: 0.86rem; color: var(--ink-2); }
+
+  /* ---------- sections ---------- */
+
+  section { display: flex; flex-direction: column; gap: 1rem; }
+
+  section > h2 {
+    font-family: var(--serif);
+    font-weight: 600;
+    font-size: 1.5rem;
+    letter-spacing: -0.01em;
+    margin: 0;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid var(--rule-strong);
+    text-wrap: balance;
+  }
+
+  /* ---------- tables ---------- */
+
+  .scroller {
+    overflow-x: auto;
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 2px;
+  }
+
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 0.875rem;
+  }
+  caption {
+    caption-side: top;
+    text-align: left;
+    padding: 0.85rem 1rem 0.15rem;
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+  }
+  th, td {
+    padding: 0.62rem 0.85rem;
+    text-align: right;
+    border-bottom: 1px solid var(--rule);
+    white-space: nowrap;
+  }
+  thead th {
+    font-family: var(--mono);
+    font-weight: 500;
+    font-size: 0.68rem;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    vertical-align: bottom;
+    border-bottom: 1px solid var(--rule-strong);
+  }
+  tbody td { font-family: var(--mono); font-variant-numeric: tabular-nums; color: var(--ink); }
+  tbody tr:last-child td, tbody tr:last-child th { border-bottom: none; }
+  tbody tr:hover td, tbody tr:hover th.cat { background: var(--surface-sunk); }
+  th.cat, td.cat {
+    text-align: left;
+    font-family: var(--mono);
+    font-weight: 500;
+    font-size: 0.8rem;
+    color: var(--ink);
+    position: sticky;
+    left: 0;
+    background: var(--surface);
+    box-shadow: 1px 0 0 var(--rule);
+  }
+  tfoot td, tfoot th {
+    border-top: 1px solid var(--rule-strong);
+    border-bottom: none;
+    font-family: var(--mono);
+    font-weight: 620;
+    color: var(--ink);
+    background: var(--surface-sunk);
+  }
+  tfoot th.cat { background: var(--surface-sunk); text-align: left; }
+  td.dim { color: var(--ink-3); }
+
+  /* ---------- in-row bars ---------- */
+
+  .barcell { width: 34%; min-width: 12rem; }
+  .bar {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+  }
+  .bar .track {
+    flex: 1;
+    height: 9px;
+    background: var(--surface-sunk);
+    border: 1px solid var(--rule);
+    border-radius: 2px;
+    overflow: hidden;
+    min-width: 5rem;
+  }
+  .bar .fill {
+    display: block;
+    height: 100%;
+    background: var(--series-1);
+    border-radius: 0 4px 4px 0;
+  }
+  .bar .fill.alt { background: var(--series-2); }
+  .bar .pct { width: 3.6rem; text-align: right; font-variant-numeric: tabular-nums; }
+
+  /* token range strip: filled = p50, dim continuation = p95, tick = max */
+  .range {
+    display: block;
+    width: 100%;
+    position: relative;
+    height: 9px;
+    background: var(--surface-sunk);
+    border: 1px solid var(--rule);
+    border-radius: 2px;
+    min-width: 8rem;
+    overflow: hidden;
+  }
+  .range .p95 {
+    position: absolute; inset-block: 0; left: 0;
+    background: var(--series-1-dim);
+    border-radius: 0 4px 4px 0;
+  }
+  .range .p50 {
+    position: absolute; inset-block: 0; left: 0;
+    background: var(--series-1);
+    border-radius: 0 4px 4px 0;
+  }
+  .range .mx {
+    position: absolute; inset-block: 0; width: 2px;
+    background: var(--ink-2);
+  }
+
+  /* ---------- pills ---------- */
+
+  .pill {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 0.15rem 0.5rem;
+    border-radius: 2px;
+    border: 1px solid;
+  }
+  .pill.headroom { color: var(--ink); background: var(--good-wash); border-color: var(--good); }
+  .pill.saturated { color: var(--ink); background: var(--warning-wash); border-color: var(--warning); }
+  .pill.floored  { color: var(--ink); background: var(--critical-wash); border-color: var(--critical); }
+
+  /* ---------- callouts ---------- */
+
+  .callout {
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-left: 3px solid var(--series-2);
+    border-radius: 2px;
+    padding: 1.1rem 1.3rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+  }
+  .callout.plain { border-left-color: var(--rule-strong); }
+  .callout h3 {
+    font-family: var(--sans);
+    font-size: 0.95rem;
+    font-weight: 620;
+    margin: 0;
+    color: var(--ink);
+  }
+  .callout p { font-size: 0.9rem; }
+
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem 1.25rem;
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    color: var(--ink-3);
+    align-items: center;
+  }
+  .legend span { display: inline-flex; align-items: center; gap: 0.4rem; }
+  .swatch { width: 12px; height: 9px; border-radius: 2px; display: inline-block; }
+
+  .notes { display: flex; flex-direction: column; gap: 0.55rem; }
+  .notes li { font-size: 0.85rem; color: var(--ink-2); max-width: 74ch; }
+  ol.notes { padding-left: 1.4rem; margin: 0; }
+
+  footer {
+    border-top: 1px solid var(--rule);
+    padding-top: 1.25rem;
+    font-family: var(--mono);
+    font-size: 0.73rem;
+    color: var(--ink-3);
+    line-height: 1.7;
+  }
+
+  details summary {
+    cursor: pointer;
+    font-family: var(--mono);
+    font-size: 0.75rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+  details > div { margin-top: 0.85rem; }
+
+  sup.fn { font-family: var(--mono); font-size: 0.65em; color: var(--series-2); padding-left: 0.15em; }
+</style>
+
+<div class="wrap">
+
+  <header class="masthead">
+    <p class="eyebrow">Stage 2 · supervised fine-tuning · post-training eval</p>
+    <h1>full_0727 against real train.csv rows
+      <span class="sub">1,750 greedy samples · 250 per category · 656 correct (37.5%)</span>
+    </h1>
+    <p>The SFT checkpoint has <strong>learned the output format</strong> — 100% of completions
+      emit step tags and none re-open <code>&lt;think&gt;</code>. What it has not learned is
+      most of the tasks: accuracy spans 90.0% on <code>numeral</code> down to 0.4% on
+      <code>bit_manipulation</code>. Everything below is read straight from
+      <code>sft_tinker_train_csv_eval.csv</code>; nothing here re-samples the model.</p>
+
+    <dl class="provenance">
+      <div><dt>Checkpoint</dt><dd>full_0727 / final</dd></div>
+      <div><dt>Base model</dt><dd>Qwen/Qwen3.5-4B</dd></div>
+      <div><dt>Adapter</dt><dd>LoRA, Tinker-hosted</dd></div>
+      <div><dt>Sampling</dt><dd>temperature 0.0 (greedy)</dd></div>
+      <div><dt>Prompt style</dt><dd>chat · max_seq_len 8704</dd></div>
+      <div><dt>Token cap</dt><dd>8291–8440 per row</dd></div>
+      <div><dt>Eval set</dt><dd>train.csv · 250 × 7 = 1750</dd></div>
+      <div><dt>Train/eval overlap</dt><dd>0 rows (verified)</dd></div>
+      <div><dt>Sampled</dt><dd>2026-07-28 15:56→18:03 UTC</dd></div>
+      <div><dt>Git commit</dt><dd>b5ef679</dd></div>
+    </dl>
+  </header>
+
+  <div class="tiles">
+    <div class="tile">
+      <span class="val">37.5<small>%</small></span>
+      <span class="lab">Overall accuracy — 656 / 1750</span>
+    </div>
+    <div class="tile">
+      <span class="val">100<small>%</small></span>
+      <span class="lab">Emit step tags — 1750 / 1750</span>
+    </div>
+    <div class="tile">
+      <span class="val">76.8<small>%</small></span>
+      <span class="lab">Fully valid format — 1344 / 1750</span>
+    </div>
+    <div class="tile">
+      <span class="val">13.0<small>%</small></span>
+      <span class="lab">Hit the token cap — 228 / 1750</span>
+    </div>
+  </div>
+
+  <!-- =============== ACCURACY =============== -->
+  <section>
+    <h2>Accuracy by category</h2>
+    <p>Sorted best to worst. The <em>headroom</em> column is the GRPO read, not a quality
+      grade: reinforcement learning draws its gradient from disagreement <em>within</em> a
+      group of rollouts on one prompt, so a category the policy almost always gets right and
+      one it almost never gets right are equally useless to train on.</p>
+
+    <div class="scroller">
+      <table>
+        <caption>Answer correctness · greedy, one sample per row</caption>
+        <thead>
+          <tr>
+            <th class="cat">Category</th>
+            <th>Correct</th>
+            <th class="barcell">Accuracy</th>
+            <th>Official rule<sup class="fn">1</sup></th>
+            <th>Wrong: capped</th>
+            <th>Wrong: answered</th>
+            <th>GRPO headroom</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th class="cat" scope="row">numeral</th>
+            <td>225 / 250</td>
+            <td class="barcell"><span class="bar"><span class="track"><span class="fill" style="width:90.0%"></span></span><span class="pct">90.0%</span></span></td>
+            <td class="dim">— same</td>
+            <td>0</td>
+            <td>25</td>
+            <td><span class="pill saturated">saturated</span></td>
+          </tr>
+          <tr>
+            <th class="cat" scope="row">unit_conversion</th>
+            <td>158 / 250</td>
+            <td class="barcell"><span class="bar"><span class="track"><span class="fill" style="width:63.2%"></span></span><span class="pct">63.2%</span></span></td>
+            <td>182 · 72.8%</td>
+            <td>22</td>
+            <td>70</td>
+            <td><span class="pill headroom">headroom</span></td>
+          </tr>
+          <tr>
+            <th class="cat" scope="row">cipher</th>
+            <td>133 / 250</td>
+            <td class="barcell"><span class="bar"><span class="track"><span class="fill" style="width:53.2%"></span></span><span class="pct">53.2%</span></span></td>
+            <td class="dim">— same</td>
+            <td>48</td>
+            <td>69</td>
+            <td><span class="pill headroom">headroom</span></td>
+          </tr>
+          <tr>
+            <th class="cat" scope="row">gravity</th>
+            <td>113 / 250</td>
+            <td class="barcell"><span class="bar"><span class="track"><span class="fill" style="width:45.2%"></span></span><span class="pct">45.2%</span></span></td>
+            <td>142 · 56.8%</td>
+            <td>22</td>
+            <td>115</td>
+            <td><span class="pill headroom">headroom</span></td>
+          </tr>
+          <tr>
+            <th class="cat" scope="row">equation_numeric</th>
+            <td>24 / 250</td>
+            <td class="barcell"><span class="bar"><span class="track"><span class="fill" style="width:9.6%"></span></span><span class="pct">9.6%</span></span></td>
+            <td class="dim">— same<sup class="fn">2</sup></td>
+            <td>32</td>
+            <td>194</td>
+            <td><span class="pill floored">floored</span></td>
+          </tr>
+          <tr>
+            <th class="cat" scope="row">cryptarithm</th>
+            <td>2 / 250</td>
+            <td class="barcell"><span class="bar"><span class="track"><span class="fill" style="width:0.8%"></span></span><span class="pct">0.8%</span></span></td>
+            <td class="dim">— same</td>
+            <td>10</td>
+            <td>238</td>
+            <td><span class="pill floored">floored</span></td>
+          </tr>
+          <tr>
+            <th class="cat" scope="row">bit_manipulation</th>
+            <td>1 / 250</td>
+            <td class="barcell"><span class="bar"><span class="track"><span class="fill" style="width:0.4%"></span></span><span class="pct">0.4%</span></span></td>
+            <td class="dim">— same</td>
+            <td>94</td>
+            <td>155</td>
+            <td><span class="pill floored">floored</span></td>
+          </tr>
+        </tbody>
+        <tfoot>
+          <tr>
+            <th class="cat" scope="row">total</th>
+            <td>656 / 1750</td>
+            <td class="barcell"><span class="bar"><span class="track"><span class="fill" style="width:37.5%"></span></span><span class="pct">37.5%</span></span></td>
+            <td>709 · 40.5%</td>
+            <td>228</td>
+            <td>866</td>
+            <td></td>
+          </tr>
+        </tfoot>
+      </table>
+    </div>
+
+    <div class="legend">
+      <span><i class="swatch" style="background:var(--series-1)"></i> accuracy</span>
+      <span><i class="swatch" style="background:var(--good-wash);border:1px solid var(--good)"></i> headroom — rollouts will disagree, GRPO has signal</span>
+      <span><i class="swatch" style="background:var(--warning-wash);border:1px solid var(--warning)"></i> saturated — near ceiling</span>
+      <span><i class="swatch" style="background:var(--critical-wash);border:1px solid var(--critical)"></i> floored — near zero</span>
+    </div>
+
+    <div class="callout">
+      <h3>53 gravity / unit_conversion rows are graded wrong — for two separate reasons</h3>
+      <p>Re-grading those two categories with the repo's own <code>compare_answer()</code>
+        moves gravity <strong>113 → 142</strong> and unit_conversion
+        <strong>158 → 182</strong>. The 53 rows split cleanly:</p>
+      <p><strong>32 are a float-comparison bug, not a metric disagreement.</strong>
+        <code>eval_sft_tinker_train_csv.py</code>'s <code>is_correct()</code> writes
+        <code>abs(pred − truth) &lt;= 1e-2</code> with no epsilon, and in float64
+        <code>abs(85.02 − 85.03)</code> evaluates to <code>0.010000000000005</code>. Rows
+        exactly 0.01 apart — precisely the ones that check was written to accept — fail it.
+        One-line fix in that script, independent of which tolerance is correct.</p>
+      <p><strong>21 are the genuine absolute-vs-relative gap.</strong> That check uses an
+        <em>absolute</em> 1e-2; the competition's stated metric is <em>relative</em> 1e-2, so
+        rows like <code>152.87</code> against <code>152.83</code> (0.026% off) are correct by
+        the real metric and rejected here.</p>
+      <p>The 37.5% headline is kept as the CSV reports it, so this page agrees with the numbers
+        already recorded in CLAUDE.md. A grader fixing both issues would print
+        <strong>709 / 40.5%</strong> — or 713 / 40.7% if it also applied the tolerance
+        uniformly to <code>equation_numeric</code>'s plain-string answers, which it should not
+        (note 2).</p>
+    </div>
+  </section>
+
+  <!-- =============== FORMAT =============== -->
+  <section>
+    <h2>Format health</h2>
+    <p>Two columns are constant across all 1,750 rows and are omitted rather than tabled:
+      every completion contains step tags, and none re-opens <code>&lt;think&gt;</code>.
+      <em>Valid</em> below means all four at once — closed <code>&lt;/think&gt;</code>, a
+      trailing <code>\boxed{}</code>, a <code>conclusion</code> step, and balanced step
+      tags.</p>
+
+    <div class="scroller">
+      <table>
+        <caption>Structural checks · count of 250 per category · rows in accuracy order</caption>
+        <thead>
+          <tr>
+            <th class="cat">Category</th>
+            <th class="barcell">Valid (all four)</th>
+            <th>Closed &lt;/think&gt;</th>
+            <th>Trailing \boxed{}</th>
+            <th>conclusion tag</th>
+            <th>Unbalanced tags</th>
+            <th>Steps p50</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th class="cat" scope="row">numeral</th>
+            <td class="barcell"><span class="bar"><span class="track"><span class="fill alt" style="width:100%"></span></span><span class="pct">250</span></span></td>
+            <td>250</td><td>250</td><td>250</td><td>0</td><td>16</td>
+          </tr>
+          <tr>
+            <th class="cat" scope="row">unit_conversion</th>
+            <td class="barcell"><span class="bar"><span class="track"><span class="fill alt" style="width:91.2%"></span></span><span class="pct">228</span></span></td>
+            <td>228</td><td>228</td><td>228</td><td>0</td><td>22</td>
+          </tr>
+          <tr>
+            <th class="cat" scope="row">cipher</th>
+            <td class="barcell"><span class="bar"><span class="track"><span class="fill alt" style="width:44.4%"></span></span><span class="pct">111</span></span></td>
+            <td>202</td><td>202</td><td>186</td><td>120</td><td>198</td>
+          </tr>
+          <tr>
+            <th class="cat" scope="row">gravity</th>
+            <td class="barcell"><span class="bar"><span class="track"><span class="fill alt" style="width:90.8%"></span></span><span class="pct">227</span></span></td>
+            <td>227</td><td>227</td><td>228<sup class="fn">3</sup></td><td>1</td><td>27</td>
+          </tr>
+          <tr>
+            <th class="cat" scope="row">equation_numeric</th>
+            <td class="barcell"><span class="bar"><span class="track"><span class="fill alt" style="width:62.0%"></span></span><span class="pct">155</span></span></td>
+            <td>218</td><td>218</td><td>208</td><td>94</td><td>13</td>
+          </tr>
+          <tr>
+            <th class="cat" scope="row">cryptarithm</th>
+            <td class="barcell"><span class="bar"><span class="track"><span class="fill alt" style="width:90.4%"></span></span><span class="pct">226</span></span></td>
+            <td>240</td><td>238</td><td>235</td><td>18</td><td>63</td>
+          </tr>
+          <tr>
+            <th class="cat" scope="row">bit_manipulation</th>
+            <td class="barcell"><span class="bar"><span class="track"><span class="fill alt" style="width:58.8%"></span></span><span class="pct">147</span></span></td>
+            <td>156</td><td>156</td><td>152</td><td>98</td><td>7</td>
+          </tr>
+        </tbody>
+        <tfoot>
+          <tr>
+            <th class="cat" scope="row">total</th>
+            <td class="barcell"><span class="bar"><span class="track"><span class="fill alt" style="width:76.8%"></span></span><span class="pct">1344</span></span></td>
+            <td>1521</td><td>1519</td><td>1487</td><td>331</td><td>—</td>
+          </tr>
+        </tfoot>
+      </table>
+    </div>
+
+    <p><strong>Unbalanced step tags are not just truncation.</strong> Of the 331 completions
+      with mismatched <code>&lt;step&gt;</code>/<code>&lt;/step&gt;</code> counts, 159 stopped
+      cleanly and still came out unbalanced — <code>cipher</code> alone contributes 80 of
+      those. So the model does drop closing tags mid-trace, most often in the categories whose
+      traces are longest. Unbalanced does not imply wrong: 46 of the 331 were still correct.
+      <code>cipher</code> is also the only category emitting tags outside the six-tag
+      vocabulary, and only twice (<code>match</code>, <code>answer</code>) — an inherited
+      quirk of its gold traces, which already use <code>deduction</code> and
+      <code>input_parsing</code>.</p>
+  </section>
+
+  <!-- =============== TRUNCATION =============== -->
+  <section>
+    <h2>Truncation</h2>
+    <div class="callout">
+      <h3>228 completions hit the token cap. Not one of them was correct.</h3>
+      <p>Across every category, <code>stop_reason == "length"</code> and a right answer never
+        co-occur — 0 for 228. Truncation is therefore a clean write-off rather than a
+        confound: raising the cap can only recover rows the model would have finished, and
+        capping lower costs nothing on rows it already gets right. <code>bit_manipulation</code>
+        is the extreme case: 94 of 250 samples ran out of budget, and its median completion
+        (7,402 tokens) sits within 12% of the ceiling.</p>
+    </div>
+
+    <div class="scroller">
+      <table>
+        <caption>Completions stopped by the token cap · rows in accuracy order</caption>
+        <thead>
+          <tr>
+            <th class="cat">Category</th>
+            <th>Capped</th>
+            <th>Capped &amp; correct</th>
+            <th>Clean stops</th>
+            <th>Accuracy on clean stops</th>
+            <th>Δ vs headline (pp)</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><th class="cat" scope="row">numeral</th><td>0</td><td>0</td><td>250</td><td>90.0%</td><td class="dim">+0.0</td></tr>
+          <tr><th class="cat" scope="row">unit_conversion</th><td>22</td><td>0</td><td>228</td><td>69.3%</td><td class="dim">+6.1</td></tr>
+          <tr><th class="cat" scope="row">cipher</th><td>48</td><td>0</td><td>202</td><td>65.8%</td><td class="dim">+12.6</td></tr>
+          <tr><th class="cat" scope="row">gravity</th><td>22</td><td>0</td><td>228</td><td>49.6%</td><td class="dim">+4.4</td></tr>
+          <tr><th class="cat" scope="row">equation_numeric</th><td>32</td><td>0</td><td>218</td><td>11.0%</td><td class="dim">+1.4</td></tr>
+          <tr><th class="cat" scope="row">cryptarithm</th><td>10</td><td>0</td><td>240</td><td>0.8%</td><td class="dim">+0.0</td></tr>
+          <tr><th class="cat" scope="row">bit_manipulation</th><td>94</td><td>0</td><td>156</td><td>0.6%</td><td class="dim">+0.2</td></tr>
+        </tbody>
+        <tfoot>
+          <tr><th class="cat" scope="row">total</th><td>228</td><td>0</td><td>1522</td><td>43.1%</td><td>+5.6</td></tr>
+        </tfoot>
+      </table>
+    </div>
+  </section>
+
+  <!-- =============== LENGTH =============== -->
+  <section>
+    <h2>Completion length</h2>
+    <p>The column that does real work downstream is <strong>longest correct</strong>: no right
+      answer in this eval has ever been longer than that, which is what makes it the honest
+      floor for a GRPO <code>max_tokens</code>. For the two categories GRPO currently defaults
+      to, that floor is 759 (<code>numeral</code>) and 1,545 (<code>equation_numeric</code>) —
+      the basis for <code>Cfg.max_tokens = 2048</code>.</p>
+
+    <div class="scroller">
+      <table>
+        <caption>Generated tokens per completion · bar spans 0 → 8,440 (the cap) · rows in accuracy order</caption>
+        <thead>
+          <tr>
+            <th class="cat">Category</th>
+            <th class="barcell">p50 → p95 → max</th>
+            <th>p50</th>
+            <th>p95</th>
+            <th>max</th>
+            <th>Longest correct</th>
+            <th>Prompt p50</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th class="cat" scope="row">numeral</th>
+            <td class="barcell"><span class="range"><span class="p95" style="width:5.4%"></span><span class="p50" style="width:3.9%"></span><span class="mx" style="left:calc(9.0% - 1px)"></span></span></td>
+            <td>325</td><td>455</td><td>759</td><td>759</td><td>270</td>
+          </tr>
+          <tr>
+            <th class="cat" scope="row">unit_conversion</th>
+            <td class="barcell"><span class="range"><span class="p95" style="width:99.5%"></span><span class="p50" style="width:64.8%"></span><span class="mx" style="left:calc(99.8% - 1px)"></span></span></td>
+            <td>5472</td><td>8400</td><td>8423</td><td>7978</td><td>298</td>
+          </tr>
+          <tr>
+            <th class="cat" scope="row">cipher</th>
+            <td class="barcell"><span class="range"><span class="p95" style="width:99.5%"></span><span class="p50" style="width:63.9%"></span><span class="mx" style="left:calc(99.6% - 1px)"></span></span></td>
+            <td>5393</td><td>8394</td><td>8409</td><td>7935</td><td>326</td>
+          </tr>
+          <tr>
+            <th class="cat" scope="row">gravity</th>
+            <td class="barcell"><span class="range"><span class="p95" style="width:98.9%"></span><span class="p50" style="width:50.9%"></span><span class="mx" style="left:calc(99.4% - 1px)"></span></span></td>
+            <td>4300</td><td>8349</td><td>8389</td><td>7704</td><td>338</td>
+          </tr>
+          <tr>
+            <th class="cat" scope="row">equation_numeric</th>
+            <td class="barcell"><span class="range"><span class="p95" style="width:99.7%"></span><span class="p50" style="width:5.8%"></span><span class="mx" style="left:calc(99.8% - 1px)"></span></span></td>
+            <td>489</td><td>8412</td><td>8427</td><td>1545</td><td>290</td>
+          </tr>
+          <tr>
+            <th class="cat" scope="row">cryptarithm</th>
+            <td class="barcell"><span class="range"><span class="p95" style="width:27.7%"></span><span class="p50" style="width:19.6%"></span><span class="mx" style="left:calc(100% - 2px)"></span></span></td>
+            <td>1656</td><td>2336</td><td>8439</td><td class="dim">1468<sup class="fn">4</sup></td><td>276</td>
+          </tr>
+          <tr>
+            <th class="cat" scope="row">bit_manipulation</th>
+            <td class="barcell"><span class="range"><span class="p95" style="width:98.2%"></span><span class="p50" style="width:87.7%"></span><span class="mx" style="left:calc(98.2% - 1px)"></span></span></td>
+            <td>7402</td><td>8291</td><td>8291</td><td class="dim">1164<sup class="fn">4</sup></td><td>432</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="legend">
+      <span><i class="swatch" style="background:var(--series-1)"></i> median</span>
+      <span><i class="swatch" style="background:var(--series-1-dim)"></i> to 95th percentile</span>
+      <span><i class="swatch" style="background:var(--ink-2);width:2px;height:9px;border-radius:0"></i> max</span>
+    </div>
+
+    <p><code>equation_numeric</code> is the sharpest shape in the table: a 489-token median
+      against an 8,412-token p95. Its traces are short when the model commits and runaway when
+      it doesn't — the same bimodality that puts 32 of its samples into the cap.</p>
+  </section>
+
+  <!-- =============== READ =============== -->
+  <section>
+    <h2>What this says for stage 3</h2>
+    <p>Read as a GRPO planning document rather than a scorecard, the table says one thing
+      loudly: <strong>the two categories the GRPO script currently defaults to are the two
+      worst available picks.</strong> <code>numeral</code> at 90.0% is close enough to the
+      ceiling that a group of eight rollouts will usually agree; <code>equation_numeric</code>
+      at 9.6% is close enough to the floor that a group will usually agree in the other
+      direction. Either way the centred advantage is near zero and the gradient is noise.</p>
+    <p><code>unit_conversion</code> (63.2%), <code>cipher</code> (53.2%) and
+      <code>gravity</code> (45.2%) sit where disagreement actually lives — at roughly 4× the
+      rollout cost, since their traces run 4–5k tokens against numeral's 325. That tradeoff is
+      the decision this eval exists to inform, and it should be confirmed with
+      <code>--probe-headroom</code> rather than settled from this page: these numbers are
+      single-sample at temperature 0 on <code>train.csv</code>, whereas GRPO samples eight
+      times at nonzero temperature on in-distribution <code>synth_sft.jsonl</code> rows and
+      will score higher.</p>
+    <p><code>cryptarithm</code> (0.8%) and <code>bit_manipulation</code> (0.4%) are not GRPO
+      problems at all at this accuracy. They need a better policy first — more SFT signal, or
+      a task decomposition — before reinforcement learning has anything to amplify.</p>
+  </section>
+
+  <section>
+    <h2>Notes</h2>
+    <ol class="notes">
+      <li><strong>Official rule.</strong> Re-grade of <code>model_answer</code> against
+        <code>ground_truth</code> with <code>scripts/eval_train_csv.compare_answer()</code> —
+        exact string, else relative 1e-2 (<code>rel_tol=1e-2, abs_tol=1e-5</code>), with binary
+        strings held to exact match so leading zeros can't be discarded by float parsing.
+        "— same" means the re-grade changed nothing for that category.</li>
+      <li><strong>equation_numeric is deliberately excluded from the re-grade.</strong> Applying
+        the relative tolerance there nominally adds 4 rows, but all four are spurious: three are
+        unrelated integers one apart (<code>104</code> vs <code>103</code>, <code>127</code> vs
+        <code>128</code>, <code>118</code> vs <code>119</code>) and the fourth is
+        <code>2</code> against a ground truth of <code>02</code>. equation_numeric answers are
+        plain strings, not estimated decimals, so exact match is the right grader — the same
+        reason binary strings are special-cased.</li>
+      <li><strong>gravity, 228 conclusion tags but 227 closed <code>&lt;/think&gt;</code>.</strong>
+        Not a transcription error: one completion emits a <code>conclusion</code> step without
+        ever closing its <code>&lt;think&gt;</code> block. The <em>Valid</em> column requires
+        all four checks and correctly reads 227.</li>
+      <li><strong>Single-observation cells.</strong> <code>cryptarithm</code> got 2 rows right
+        and <code>bit_manipulation</code> 1, so "longest correct" for those is one or two
+        completions, not a distribution. The same caveat applies to their clean-stop accuracy
+        (2/240 and 1/156).</li>
+    </ol>
+    <details>
+      <summary>Reproducing these numbers</summary>
+      <div>
+        <p>Every figure on this page comes from <code>sft_tinker_train_csv_eval.csv</code>
+          (1,750 rows) and its companion
+          <code>sft_tinker_train_csv_eval.manifest.json</code> (run provenance). Nothing was
+          re-sampled; no paid API call is needed to regenerate the page. The
+          <em>Official rule</em> column additionally imports
+          <code>compare_answer</code> from <code>scripts/eval_train_csv.py</code>.</p>
+      </div>
+    </details>
+  </section>
+
+  <footer>
+    full_0727 · Qwen/Qwen3.5-4B + LoRA · greedy decode · 1750 rows of train.csv · sampled 2026-07-28<br>
+    Source: sft_tinker_train_csv_eval.csv · report generated 2026-07-29
+  </footer>
+
+</div>
